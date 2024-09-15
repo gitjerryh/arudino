@@ -1,0 +1,29 @@
+
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <Wire.h>
+#include "img1.h"
+
+TFT_eSPI tft = TFT_eSPI(); // Invoke custom library
+ 
+void setup()
+{
+
+ Serial.begin(115200);
+ tft.init();  //TFT初始化
+ tft.setRotation(2); // landscape
+  tft.fillScreen(TFT_BLACK);
+
+  // Swap the colour byte order when rendering
+  tft.setSwapBytes(true);
+  
+}
+ 
+void loop()
+{
+  tft.pushImage(0, 0,240,320,gImage_demo_image1);
+  delay(10000);
+
+}
+ 
+
