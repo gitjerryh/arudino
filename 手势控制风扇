@@ -36,10 +36,14 @@ void setup() {
 
 void loop() {
     uint8_t data = 0;
-    PAJ7620ReadReg(0x43, 1, &data); // Read Bank_0_Reg_0x43/0x44 for gesture result.
+    PAJ7620ReadReg(0x43, 1, &data); // 读取手势结果
+
+    // 添加调试信息
+    Serial.print("Gesture data: ");
+    Serial.println(data);
+
     u8g2.clearBuffer();
     u8g2.setCursor(0, 15);
-
     switch (data) {
         case GES_CLOCKWISE_FLAG:
             u8g2.print("Clockwise");
@@ -58,7 +62,6 @@ void loop() {
             }
             break;
     }
-    
     u8g2.sendBuffer();
     delay(100);
 }
