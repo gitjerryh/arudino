@@ -7,7 +7,12 @@
  * @Copyright	This code is public domain but you buy me a beer if you use
  * this and we meet someday (Beerware license).
  */
- 
+ ///s3project
+//│
+//├── src
+//│   ├── main.cpp
+//│   ├── PAJ7620.cpp
+//│   └── PAJ7620.h
 #include <Wire.h>
 #include "PAJ7620.h"
 #include <Arduino.h>
