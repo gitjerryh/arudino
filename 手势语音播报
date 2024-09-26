@@ -1,0 +1,71 @@
+#include <PAJ7620.h>
+#include <Wire.h>
+#include "PAJ7620.h"
+#include <Arduino.h>
+#include "DFRobot_SpeechSynthesis_V2.h" // 引入语音合成库
+
+#define PAJ7620_Delay 800
+DFRobot_SpeechSynthesis_I2C ss; // 创建语音合成对象
+
+// 函数前向声明
+void handleGesture(const char* gesture);
+
+void setup() {
+    uint8_t error = 0;
+    Serial.begin(115200);
+    Serial.println("\r\nPAJ7620U2 TEST DEMO: Recognize 9 gestures.");
+    error = PAJ7620Init(); // 初始化Paj7620寄存器
+    if (error) {
+        Serial.print("INIT ERROR,CODE:");
+        Serial.println(error);
+    } else {
+        Serial.println("INIT OK");
+    }
+    ss.begin(); // 初始化语音合成传感器
+    Serial.println("Please input your gestures:\n");
+}
+
+void loop() {
+    uint8_t data = 0;
+    PAJ7620ReadReg(0x43, 1, &data); // 读取手势结果
+    switch (data) {
+        case GES_RIGHT_FLAG:
+            handleGesture("右");
+            break;
+        case GES_LEFT_FLAG:
+            handleGesture("左");
+            break;
+        case GES_UP_FLAG:
+            handleGesture("上");
+            break;
+        case GES_DOWN_FLAG:
+            handleGesture("下");
+            break;
+        case GES_FORWARD_FLAG:
+            handleGesture("前");
+            break;
+        case GES_BACKWARD_FLAG:
+            handleGesture("后");
+            break;
+        case GES_CLOCKWISE_FLAG:
+            handleGesture("顺时针");
+            break;
+        case GES_COUNT_CLOCKWISE_FLAG:
+            handleGesture("逆时针");
+            break;
+        default:
+            PAJ7620ReadReg(0x44, 1, &data);
+            if (data == GES_WAVE_FLAG) {
+                handleGesture("挥手");
+            }
+            break;
+    }
+    delay(100);
+}
+
+void handleGesture(const char* gesture) {
+    delay(PAJ7620_Delay);
+    Serial.println(gesture);
+    delay(1000); // 等待1秒
+    ss.speak(gesture); // 播报手势
+}
