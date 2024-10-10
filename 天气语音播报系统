@@ -32,6 +32,7 @@ void ASRTask(void *pvParameters);
 void WeatherTask(void *pvParameters);
 void FanControlTask(void *pvParameters);
 void SpeechSynthesisTask(void *pvParameters);
+void SpeakWeatherAndTime();
 
 // 全局变量
 DFRobot_ASR asr;
@@ -43,6 +44,9 @@ int pwmValue = 0; // 风扇的PWM值，范围从0到255
 String currentWeather;
 String currentTemperature;
 String currentTime;
+
+// 用于跟踪语音合成状态的全局变量
+bool isSpeaking = false;
 
 void setup() {
     Serial.begin(115200);
@@ -178,51 +182,61 @@ void printLocalTime() {
     u8g2.setCursor(95, 64);
     u8g2.print(&timeinfo, "%R"); // 小时-分钟
 }
+
 void ASRTask(void *pvParameters) {
     while (1) {
-        switch (asr.read()) {
-            case 2: // 唤醒词“xiao zhi”
-                ss.speak(F("我在，有什么吩咐呀"));
-                Serial.println("received 'xiao zhi', command flag '2'");
-                break;
-            case 0: // 开启风扇
-                pwmValue = 128;
-                analogWrite(pwmPin, pwmValue);
-                ss.speak(F("风扇已开启"));
-                Serial.println("received 'da kai feng shan', command flag '0'");
-                break;
-            case 1: // 关闭风扇
-                pwmValue = 0;
-                analogWrite(pwmPin, pwmValue);
-                ss.speak(F("风扇已关闭"));
-                Serial.println("received 'guan bi feng shan', command flag '1'");
-                break;
-            case 3: // 提速风扇
-                pwmValue += 51;
-                if (pwmValue > 255) pwmValue = 255;
-                analogWrite(pwmPin, pwmValue);
-                ss.speak(F("风扇提速"));
-                Serial.print("received 'ti su ', command flag '3', pwmValue: ");
-                Serial.println(pwmValue);
-                break;
-            case 4: // 降速风扇
-                pwmValue -= 51;
-                if (pwmValue < 0) pwmValue = 0;
-                analogWrite(pwmPin, pwmValue);
-                ss.speak(F("风扇降速"));
-                Serial.print("received 'jiang su ', command flag '4', pwmValue: ");
-                Serial.println(pwmValue);
-                break;
-            case 5: // 今天天气怎么样
-                ss.speak(F("今天的天气是"));
-                delay(1000); // 等待一秒以确保语音合成完成
-                ss.speak(currentWeather + F("，温度是") + currentTemperature + F("摄氏度"));
-                break;
-            case 6: // 现在的时间是多少了
-                ss.speak(F("现在的时间是"));
-                delay(1000); // 等待一秒以确保语音合成完成
-                ss.speak(currentTime);
-                break;
+        if (!isSpeaking) { // 只有在不进行语音播报时才进行语音识别
+            switch (asr.read()) {
+                case 2: // 唤醒词“xiao zhi”
+                    ss.speak(F("我在，有什么吩咐呀"));
+                    isSpeaking = true; // 开始语音播报
+                    Serial.println("received 'xiao zhi', command flag '2'");
+                    break;
+                case 0: // 开启风扇
+                    pwmValue = 128;
+                    analogWrite(pwmPin, pwmValue);
+                    ss.speak(F("风扇已开启"));
+                    isSpeaking = true; // 开始语音播报
+                    Serial.println("received 'da kai feng shan', command flag '0'");
+                    break;
+                case 1: // 关闭风扇
+                    pwmValue = 0;
+                    analogWrite(pwmPin, pwmValue);
+                    ss.speak(F("风扇已关闭"));
+                    isSpeaking = true; // 开始语音播报
+                    Serial.println("received 'guan bi feng shan', command flag '1'");
+                    break;
+                case 3: // 提速风扇
+                    pwmValue += 51;
+                    if (pwmValue > 255) pwmValue = 255;
+                    analogWrite(pwmPin, pwmValue);
+                    ss.speak(F("风扇提速"));
+                    isSpeaking = true; // 开始语音播报
+                    Serial.print("received 'ti su ', command flag '3', pwmValue: ");
+                    Serial.println(pwmValue);
+                    break;
+                case 4: // 降速风扇
+                    pwmValue -= 51;
+                    if (pwmValue < 0) pwmValue = 0;
+                    analogWrite(pwmPin, pwmValue);
+                    ss.speak(F("风扇降速"));
+                    isSpeaking = true; // 开始语音播报
+                    Serial.print("received 'jiang su ', command flag '4', pwmValue: ");
+                    Serial.println(pwmValue);
+                    break;
+                case 5: // 今天天气怎么样
+                    ss.speak(F("今天的天气是"));
+                    isSpeaking = true; // 开始语音播报
+                    delay(1000); // 等待一秒以确保语音合成完成
+                    ss.speak(currentWeather + F("，温度是") + currentTemperature + F("摄氏度"));
+                    break;
+                case 6: // 现在的时间是多少了
+                    ss.speak(F("现在的时间是"));
+                    isSpeaking = true; // 开始语音播报
+                    delay(1000); // 等待一秒以确保语音合成完成
+                    ss.speak(currentTime);
+                    break;
+            }
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
@@ -245,7 +259,13 @@ void FanControlTask(void *pvParameters) {
 
 void SpeechSynthesisTask(void *pvParameters) {
     while (1) {
-        //ss.run(); // 如果需要运行语音合成的其他逻辑，可以在这里添加
+        // 检查语音合成是否完成
+        if (isSpeaking) {
+            // 这里我们假设语音合成在调用 speak 函数后会立即开始，并在一定时间后完成
+            // 实际应用中可能需要更复杂的逻辑来检测语音合成的完成状态
+            delay(1000); // 假设语音合成需要1秒完成
+            isSpeaking = false; // 重置状态
+        }
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
