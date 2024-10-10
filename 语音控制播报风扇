@@ -1,0 +1,71 @@
+#include "DFRobot_ASR.h"
+#include "DFRobot_SpeechSynthesis_V2.h"
+
+DFRobot_ASR asr;
+DFRobot_SpeechSynthesis_I2C ss;
+
+const int pwmPin = 3; // PWM引脚
+int pwmValue = 0; // 风扇的PWM值，范围从0到255
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(pwmPin, OUTPUT); // 设置PWM引脚为输出
+  digitalWrite(LED_BUILTIN, LOW); // 对 UNO 主控板的板载 LED 初始状态设置为熄灭
+  
+  // 初始化语音合成传感器
+  ss.begin();
+  ss.setVolume(5); // 设置音量
+  ss.setSpeed(5);  // 设置播放速度
+  ss.setTone(5);   // 设置音调
+
+  asr.begin(asr.PASSWORD); // 1.LOOP 2.BUTTON 3.PASSWORD
+  asr.addCommand("xiao zhi", 2); // 唤醒词
+  asr.addCommand("da kai feng shan", 0); // 开启风扇
+  asr.addCommand("guan bi feng shan", 1); // 关闭风扇
+  asr.addCommand("ti su ", 3); // 提速风扇
+  asr.addCommand("jiang su ", 4); // 降速风扇
+  asr.start();
+  Serial.println("Start");
+}
+
+void loop() {
+  switch (asr.read()) { // 判断识别内容
+    case 2: // 若是唤醒词“xiao zhi”
+      ss.speak(F("我在，有什么吩咐呀")); // 播报唤醒词
+      Serial.println("received 'xiao zhi', command flag '2'");
+      break;
+
+    case 0: // 若是指令“da kai feng shan”
+      pwmValue = 128; // 设置风扇中速
+      analogWrite(pwmPin, pwmValue); // 输出PWM信号
+      delay(1000); // 等待一秒
+      ss.speak(F("风扇已开启")); // 播报风扇已开启
+      Serial.println("received 'da kai feng shan', command flag '0'");
+      break;
+
+    case 1: // 若是指令“guan bi feng shan”
+      pwmValue = 0; // 关闭风扇
+      analogWrite(pwmPin, pwmValue); // 输出PWM信号
+      ss.speak(F("风扇已关闭")); // 播报风扇已关闭
+      Serial.println("received 'guan bi feng shan', command flag '1'");
+      break;
+
+    case 3: // 若是指令“ti su ”
+      pwmValue += 51; // 提速
+      if (pwmValue > 255) pwmValue = 255; // 限制最大值
+      analogWrite(pwmPin, pwmValue); // 输出PWM信号
+      ss.speak(F("风扇提速")); // 播报风扇提速
+      Serial.print("received 'ti su ', command flag '3', pwmValue: ");
+      Serial.println(pwmValue);
+      break;
+
+    case 4: // 若是指令“jiang su ”
+      pwmValue -= 51; // 降速
+      if (pwmValue < 0) pwmValue = 0; // 限制最小值
+      analogWrite(pwmPin, pwmValue); // 输出PWM信号
+      ss.speak(F("风扇降速")); // 播报风扇降速
+      Serial.print("received 'jiang su ', command flag '4', pwmValue: ");
+      Serial.println(pwmValue);
+      break;
+  }
+}
