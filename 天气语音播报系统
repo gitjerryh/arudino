@@ -30,6 +30,7 @@ void OLEDDisplay(String cityName, String weather, String temperature, int code_i
 void printLocalTime();
 void ASRTask(void *pvParameters);
 void WeatherTask(void *pvParameters);
+void TimeTask(void *pvParameters); // 添加这一行
 void FanControlTask(void *pvParameters);
 void SpeechSynthesisTask(void *pvParameters);
 void SpeakWeatherAndTime();
@@ -72,10 +73,11 @@ void setup() {
     asr.addCommand("xian zai de shi jian shi duo shao le", 6); // 现在的时间是多少了
     asr.start();
     // 创建FreeRTOS任务
-    xTaskCreatePinnedToCore(ASRTask, "ASRTask", 10000, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(WeatherTask, "WeatherTask", 10000, NULL, 1, NULL, 1);
-    xTaskCreatePinnedToCore(FanControlTask, "FanControlTask", 10000, NULL, 1, NULL, 1);
-    xTaskCreatePinnedToCore(SpeechSynthesisTask, "SpeechSynthesisTask", 10000, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(ASRTask, "ASRTask", 10000, NULL, 1, NULL, 0); 
+    xTaskCreatePinnedToCore(WeatherTask, "WeatherTask", 10000, NULL, 1, NULL, 1); 
+    xTaskCreatePinnedToCore(TimeTask, "TimeTask", 10000, NULL, 1, NULL, 1); // 新增时间获取任务
+    xTaskCreatePinnedToCore(FanControlTask, "FanControlTask", 10000, NULL, 1, NULL, 1); 
+    xTaskCreatePinnedToCore(SpeechSynthesisTask, "SpeechSynthesisTask", 10000, NULL, 1, NULL, 1); 
 }
 
 void loop() {
@@ -240,6 +242,13 @@ void ASRTask(void *pvParameters) {
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
+}
+
+void TimeTask(void *pvParameters) {
+    while (1) { 
+        printLocalTime(); // 获取本地时间并更新显示
+        vTaskDelay(10000 / portTICK_PERIOD_MS); // 每10秒获取一次时间
+    } 
 }
 
 void WeatherTask(void *pvParameters) {
