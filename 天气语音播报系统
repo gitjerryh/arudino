@@ -9,75 +9,76 @@
 #include <freertos/task.h>
 #include "DFRobot_ASR.h"
 #include "DFRobot_SpeechSynthesis_V2.h"
-#include "weatherpicture.h" // 确保包含天气图片的头文件
+#include "weatherpicture.h"
 
-// OLED硬件初始化
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ 20, /* data=*/ 19, /* reset=*/ U8X8_PIN_NONE);
 
-// ------------------------WIFI连接信息---------------------------------//
-const char* ssid = "OnePlus 10 Pro"; // wifi name
-const char* password = "55132768"; // wifi password
+const char* ssid = "OnePlus 10 Pro";
+const char* password = "55132768";
 
-//-------------------------网络时间获取----------------------------------//
-const char *ntpServer = "pool.ntp.org"; // 网络时间服务器
-const long gmtOffset_sec = 8 * 3600; // 时区设置函数，东八区（UTC/GMT+8:00）写成8*3600   
-const int daylightOffset_sec = 0;   // 夏令时填写3600，否则填0
+const char *ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 8 * 3600;
+const int daylightOffset_sec = 0;
 
-//==========================函数声明====================================//
+DFRobot_ASR asr;
+DFRobot_SpeechSynthesis_I2C ss;
+const int pwmPin = 3;
+int pwmValue = 0;
+
+String currentWeather;
+String currentTemperature;
+String currentTime;
+String cityName;
+int code_int;
+
+struct tm timeinfo;
+
+bool isSpeaking = false;
+bool timeSync = false;
+bool weatherSync = false;
+
 void WiFi_Connect();
 void ParserJson();
 void OLEDDisplay(String cityName, String weather, String temperature, int code_int);
 void printLocalTime();
 void ASRTask(void *pvParameters);
 void WeatherTask(void *pvParameters);
-void TimeTask(void *pvParameters); // 添加这一行
+void TimeTask(void *pvParameters);
 void FanControlTask(void *pvParameters);
 void SpeechSynthesisTask(void *pvParameters);
-void SpeakWeatherAndTime();
-
-// 全局变量
-DFRobot_ASR asr;
-DFRobot_SpeechSynthesis_I2C ss;
-const int pwmPin = 3; // PWM引脚
-int pwmValue = 0; // 风扇的PWM值，范围从0到255
-
-// 用于存储天气和时间信息的全局变量
-String currentWeather;
-String currentTemperature;
-String currentTime;
-
-// 用于跟踪语音合成状态的全局变量
-bool isSpeaking = false;
+void SyncTimeTask(void *pvParameters);
+void UpdateDisplayTask(void *pvParameters);
+void showLoadingScreen();
 
 void setup() {
     Serial.begin(115200);
     delay(1000);
     u8g2.begin();
     u8g2.enableUTF8Print();
+    
     WiFi_Connect();
-    // 从网络时间服务器上获取并设置时间
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    // 初始化语音合成传感器
+    showLoadingScreen();
+    
     ss.begin();
-    ss.setVolume(5); // 设置音量
-    ss.setSpeed(5);  // 设置播放速度
-    ss.setTone(5);   // 设置音调
-    // 初始化ASR模块
-    asr.begin(asr.PASSWORD); // 1.LOOP 2.BUTTON 3.PASSWORD
-    asr.addCommand("xiao zhi", 2); // 唤醒词
-    asr.addCommand("da kai feng shan", 0); // 开启风扇
-    asr.addCommand("guan bi feng shan", 1); // 关闭风扇
-    asr.addCommand("ti su ", 3); // 提速风扇
-    asr.addCommand("jiang su ", 4); // 降速风扇
-    asr.addCommand("jin tian tian qi zen me yang", 5); // 今天天气怎么样
-    asr.addCommand("xian zai de shi jian shi duo shao le", 6); // 现在的时间是多少了
+    ss.setVolume(5);
+    ss.setSpeed(5);
+    ss.setTone(5);
+    
+    asr.begin(asr.PASSWORD);
+    asr.addCommand("xiao zhi", 2);
+    asr.addCommand("da kai feng shan", 0);
+    asr.addCommand("guan bi feng shan", 1);
+    asr.addCommand("ti su ", 3);
+    asr.addCommand("jiang su ", 4);
+    asr.addCommand("jin tian tian qi zen me yang", 5);
+    asr.addCommand("xian zai de shi jian shi duo shao le", 6);
     asr.start();
-    // 创建FreeRTOS任务
-    xTaskCreatePinnedToCore(ASRTask, "ASRTask", 10000, NULL, 1, NULL, 0); 
-    xTaskCreatePinnedToCore(WeatherTask, "WeatherTask", 10000, NULL, 1, NULL, 1); 
-    xTaskCreatePinnedToCore(TimeTask, "TimeTask", 10000, NULL, 1, NULL, 1); // 新增时间获取任务
-    xTaskCreatePinnedToCore(FanControlTask, "FanControlTask", 10000, NULL, 1, NULL, 1); 
-    xTaskCreatePinnedToCore(SpeechSynthesisTask, "SpeechSynthesisTask", 10000, NULL, 1, NULL, 1); 
+    
+    xTaskCreatePinnedToCore(ASRTask, "ASRTask", 10000, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(WeatherTask, "WeatherTask", 10000, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(SyncTimeTask, "SyncTimeTask", 10000, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(FanControlTask, "FanControlTask", 10000, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(SpeechSynthesisTask, "SpeechSynthesisTask", 10000, NULL, 1, NULL, 1);
 }
 
 void loop() {
@@ -105,11 +106,14 @@ void ParserJson() {
             Serial.println("JSON parsing failed!");
         } else {
             JsonObject obj1 = doc["results"][0];
-            String cityName = obj1["location"]["name"].as<String>();
+            cityName = obj1["location"]["name"].as<String>();
             currentWeather = obj1["now"]["text"].as<String>();
             currentTemperature = obj1["now"]["temperature"].as<String>();
-            int code_int = obj1["now"]["code"].as<int>();
-            OLEDDisplay(cityName, currentWeather, currentTemperature, code_int);
+            code_int = obj1["now"]["code"].as<int>();
+            weatherSync = true;
+            if (timeSync) {
+                xTaskCreate(UpdateDisplayTask, "UpdateDisplayTask", 10000, NULL, 1, NULL);
+            }
         }
     } else {
         Serial.println("Error on HTTP request");
@@ -131,7 +135,8 @@ void OLEDDisplay(String cityName, String weather, String temperature, int code_i
     u8g2.print("温度: ");
     u8g2.print(temperature);
     u8g2.print("℃");
-    // 天气图标显示
+    
+    // 天气图标显示代码（保持不变）
     switch (code_int) {
         case 0: u8g2.drawXBMP(3, 3, sunny_x, sunny_y, sunny); break;
         case 1: u8g2.drawXBMP(3, 3, clear_x, clear_y, clear); break;
@@ -169,73 +174,72 @@ void printLocalTime() {
         return;
     }
     
-    // 使用strftime格式化时间
-    char timeString[64]; // 用于存储格式化后的时间字符串
-    strftime(timeString, sizeof(timeString), "%F %A %R", &timeinfo); // 格式化为 "YYYY-MM-DD 星期 X HH:MM"
+    char timeString[64];
+    strftime(timeString, sizeof(timeString), "%F %A %R", &timeinfo);
     
-    currentTime = String(timeString); // 将格式化后的字符串存储到 currentTime 中
+    currentTime = String(timeString);
 
-    Serial.println(currentTime); // 输出当前时间
+    Serial.println(currentTime);
     u8g2.setFont(u8g2_font_wqy12_t_gb2312);
     u8g2.setCursor(30, 64);
-    u8g2.print(&timeinfo, "%F");  // 日期
+    u8g2.print(&timeinfo, "%F");
     u8g2.setCursor(65, 52);
-    u8g2.print(&timeinfo, "%A");  // 星期
+    u8g2.print(&timeinfo, "%A");
     u8g2.setCursor(95, 64);
-    u8g2.print(&timeinfo, "%R"); // 小时-分钟
+    u8g2.print(&timeinfo, "%R");
 }
 
 void ASRTask(void *pvParameters) {
     while (1) {
-        if (!isSpeaking) { // 只有在不进行语音播报时才进行语音识别
+        if (!isSpeaking) {
             switch (asr.read()) {
-                case 2: // 唤醒词“xiao zhi”
+                case 2:
                     ss.speak(F("我在，有什么吩咐呀"));
-                    isSpeaking = true; // 开始语音播报
+                    isSpeaking = true;
                     Serial.println("received 'xiao zhi', command flag '2'");
                     break;
-                case 0: // 开启风扇
+                case 0:
                     pwmValue = 128;
                     analogWrite(pwmPin, pwmValue);
                     ss.speak(F("风扇已开启"));
-                    isSpeaking = true; // 开始语音播报
+                    isSpeaking = true;
                     Serial.println("received 'da kai feng shan', command flag '0'");
                     break;
-                case 1: // 关闭风扇
+                case 1:
                     pwmValue = 0;
                     analogWrite(pwmPin, pwmValue);
                     ss.speak(F("风扇已关闭"));
-                    isSpeaking = true; // 开始语音播报
+                    isSpeaking = true;
                     Serial.println("received 'guan bi feng shan', command flag '1'");
                     break;
-                case 3: // 提速风扇
+                case 3:
                     pwmValue += 51;
                     if (pwmValue > 255) pwmValue = 255;
                     analogWrite(pwmPin, pwmValue);
                     ss.speak(F("风扇提速"));
-                    isSpeaking = true; // 开始语音播报
+                    isSpeaking = true;
                     Serial.print("received 'ti su ', command flag '3', pwmValue: ");
                     Serial.println(pwmValue);
                     break;
-                case 4: // 降速风扇
+                case 4:
                     pwmValue -= 51;
                     if (pwmValue < 0) pwmValue = 0;
                     analogWrite(pwmPin, pwmValue);
                     ss.speak(F("风扇降速"));
-                    isSpeaking = true; // 开始语音播报
+                    isSpeaking = true;
                     Serial.print("received 'jiang su ', command flag '4', pwmValue: ");
                     Serial.println(pwmValue);
                     break;
-                case 5: // 今天天气怎么样
+                case 5:
                     ss.speak(F("今天的天气是"));
-                    isSpeaking = true; // 开始语音播报
-                    delay(1000); // 等待一秒以确保语音合成完成
+                    isSpeaking = true;
+                    delay(1000);
                     ss.speak(currentWeather + F("，温度是") + currentTemperature + F("摄氏度"));
                     break;
-                case 6: // 现在的时间是多少了
+                case 6:
                     ss.speak(F("现在的时间是"));
-                    isSpeaking = true; // 开始语音播报
-                    delay(1000); // 等待一秒以确保语音合成完成
+                    isSpeaking = true;
+                    delay(1000);
                     ss.speak(currentTime);
                     break;
             }
@@ -244,17 +248,10 @@ void ASRTask(void *pvParameters) {
     }
 }
 
-void TimeTask(void *pvParameters) {
-    while (1) { 
-        printLocalTime(); // 获取本地时间并更新显示
-        vTaskDelay(10000 / portTICK_PERIOD_MS); // 每10秒获取一次时间
-    } 
-}
-
 void WeatherTask(void *pvParameters) {
     while (1) {
         ParserJson();
-        vTaskDelay(30000 / portTICK_PERIOD_MS); // 知心天气API访问限制 20次/min
+        vTaskDelay(30000 / portTICK_PERIOD_MS);
     }
 }
 
@@ -268,13 +265,41 @@ void FanControlTask(void *pvParameters) {
 
 void SpeechSynthesisTask(void *pvParameters) {
     while (1) {
-        // 检查语音合成是否完成
         if (isSpeaking) {
-            // 这里我们假设语音合成在调用 speak 函数后会立即开始，并在一定时间后完成
-            // 实际应用中可能需要更复杂的逻辑来检测语音合成的完成状态
-            delay(1000); // 假设语音合成需要1秒完成
-            isSpeaking = false; // 重置状态
+            delay(1000);
+            isSpeaking = false;
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
+}
+
+void SyncTimeTask(void *pvParameters) {
+    int retry = 0;
+    const int maxRetries = 5;
+    while (retry < maxRetries) {
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+        if (getLocalTime(&timeinfo)) {
+            timeSync = true;
+            if (weatherSync) {
+                xTaskCreate(UpdateDisplayTask, "UpdateDisplayTask", 10000, NULL, 1, NULL);
+            }
+            break;
+        }
+        retry++;
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    vTaskDelete(NULL);
+}
+
+void UpdateDisplayTask(void *pvParameters) {
+    OLEDDisplay(cityName, currentWeather, currentTemperature, code_int);
+    vTaskDelete(NULL);
+}
+
+void showLoadingScreen() {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+    u8g2.setCursor(0, 32);
+    u8g2.print("正在加载天气和时间...");
+    u8g2.sendBuffer();
 }
