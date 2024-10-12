@@ -71,7 +71,7 @@ void setup() {
     asr.addCommand("ti su ", 3);
     asr.addCommand("jiang su ", 4);
     asr.addCommand("jin tian tian qi zen me yang", 5);
-    asr.addCommand("xian zai de shi jian shi duo shao le", 6);
+    asr.addCommand("dao wo chi fan shi jian le ma", 6);
     asr.start();
     
     xTaskCreatePinnedToCore(ASRTask, "ASRTask", 10000, NULL, 1, NULL, 0);
