@@ -1,0 +1,123 @@
+#include <Wire.h>
+#include <Arduino.h>
+
+// 定义通信命令帧格式
+#define HEADER1 0x55
+#define HEADER2 0xAA
+#define ADDRESS 0x11
+
+// 定义命令
+#define COMMAND_REQUEST_KNOCK 0x2C      // 请求初始化命令
+#define COMMAND_REQUEST_LEARN 0x36      // 学习面部命令
+#define COMMAND_REQUEST_FORGET 0x37     // 遗忘面部命令
+#define COMMAND_RETURN_OK 0x2E           // 返回成功命令
+#define COMMAND_RETURN_BUSY 0x3D         // 返回忙碌命令
+
+// 向 HuskyLens 发送命令的函数
+void sendCommand(byte command, byte dataLength, byte* data) {
+  // 计算校验和
+  byte checksum = HEADER1 + HEADER2 + ADDRESS + dataLength + command;
+  for (int i = 0; i < dataLength; i++) {
+    checksum += data[i]; // 将数据部分的字节加到校验和中
+  }
+  
+  // 发送命令帧
+  Wire.beginTransmission(ADDRESS); // 开始与设备的通信
+  Wire.write(HEADER1);              // 发送帧头1
+  Wire.write(HEADER2);              // 发送帧头2
+  Wire.write(ADDRESS);               // 发送设备地址
+  Wire.write(dataLength);            // 发送数据长度
+  Wire.write(command);               // 发送命令
+  for (int i = 0; i < dataLength; i++) {
+    Wire.write(data[i]);             // 发送数据部分
+  }
+  Wire.write(checksum);              // 发送校验和
+  Wire.endTransmission();            // 结束通信
+}
+
+// 从 HuskyLens 接收响应的函数
+byte* receiveResponse(byte* data, int dataLength) {
+  Wire.requestFrom(ADDRESS, dataLength + 6); // 请求数据和帧头的总字节数
+  if (Wire.available() >= dataLength + 6) { // 检查是否接收到足够的数据
+    // 接收命令帧
+    byte header1 = Wire.read();              // 读取帧头1
+    byte header2 = Wire.read();              // 读取帧头2
+    byte address = Wire.read();               // 读取设备地址
+    byte length = Wire.read();                // 读取数据长度
+    byte command = Wire.read();               // 读取命令
+    for (int i = 0; i < dataLength; i++) {
+      data[i] = Wire.read();                  // 读取数据部分
+    }
+    byte checksum = Wire.read();              // 读取校验和
+
+    // 验证校验和
+    byte calculatedChecksum = header1 + header2 + address + length + command;
+    for (int i = 0; i < dataLength; i++) {
+      calculatedChecksum += data[i];          // 计算校验和
+    }
+    if (checksum == calculatedChecksum) {
+      return data; // 如果校验和匹配，返回数据
+    } else {
+      Serial.println("响应中的校验和错误。"); // 校验和不匹配，输出错误信息
+      return NULL;
+    }
+  } else {
+    Serial.println("接收到的数据不足。"); // 数据不足，输出错误信息
+    return NULL;
+  }
+}
+
+// 执行面部识别的函数
+void faceRecognition() {
+  // 发送学习命令
+  byte data[] = {0x01, 0x00}; // ID = 1，表示学习第一个面部
+  sendCommand(COMMAND_REQUEST_LEARN, sizeof(data), data);
+  
+  // 接收响应
+  byte response[2]; // 响应缓冲区
+  if (receiveResponse(response, sizeof(response)) != NULL) {
+    // 检查响应
+    if (response[0] == COMMAND_RETURN_OK) {
+      Serial.println("面部学习成功。"); // 学习成功，输出信息
+    } else {
+      Serial.println("学习面部时出错。"); // 学习失败，输出错误信息
+    }
+  }
+  
+  // 发送遗忘命令
+  sendCommand(COMMAND_REQUEST_FORGET, 0, NULL);
+  
+  // 接收响应
+  if (receiveResponse(response, sizeof(response)) != NULL) {
+    // 检查响应
+    if (response[0] == COMMAND_RETURN_OK) {
+      Serial.println("面部遗忘成功。"); // 遗忘成功，输出信息
+    } else {
+      Serial.println("遗忘面部时出错。"); // 遗忘失败，输出错误信息
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200); // 初始化串口通信
+  Wire.begin();       // 初始化 I2C 通信
+  
+  // 初始化 HuskyLens
+  sendCommand(COMMAND_REQUEST_KNOCK, 0, NULL);
+  
+  // 接收响应
+  byte response[2]; // 响应缓冲区
+  if (receiveResponse(response, sizeof(response)) != NULL) {
+    // 检查响应
+    if (response[0] == COMMAND_RETURN_OK) {
+      Serial.println("HuskyLens 初始化成功。"); // 初始化成功，输出信息
+    } else {
+      Serial.println("初始化 HuskyLens 时出错。"); // 初始化失败，输出错误信息
+    }
+  }
+}
+
+void loop() {
+  faceRecognition(); // 不断执行面部识别
+  delay(5000);       // 每次调用之间延时 5 秒
+}
