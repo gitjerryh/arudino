@@ -2,50 +2,89 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define SCREEN_WIDTH 128  // OLED display width, in pixels
-#define SCREEN_HEIGHT 64  // OLED display height, in pixels
-#define OLED_RESET -1        // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C  ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+// Display configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Adjustable
-int ref_eye_height = 40;
-int ref_eye_width = 40;
-int ref_space_between_eye = 10;
-int ref_corner_radius = 10;
+// Configuration parameters
+struct Config {
+  int ref_eye_height = 40;
+  int ref_eye_width = 40;
+  int ref_space_between_eye = 10;
+  int ref_corner_radius = 10;
+  int blink_speed = 12;
+  int saccade_amplitude_x = 8;
+  int saccade_amplitude_y = 6;
+  int big_eye_movement_amplitude = 2;
+  int animation_delay = 2000;
+};
+
+Config config;
 
 // Current state of the eyes
-int left_eye_height = ref_eye_height;
-int left_eye_width = ref_eye_width;
-int left_eye_x = 32;
-int left_eye_y = 32;
-int right_eye_x = 32 + ref_eye_width + ref_space_between_eye;
-int right_eye_y = 32;
-int right_eye_height = ref_eye_height;
-int right_eye_width = ref_eye_width;
-int count = 0;
+struct EyeState {
+  int left_eye_height;
+  int left_eye_width;
+  int left_eye_x;
+  int left_eye_y;
+  int right_eye_x;
+  int right_eye_y;
+  int right_eye_height;
+  int right_eye_width;
+};
 
+EyeState eye_state;
+
+// Animation states
+enum AnimationState {
+  WAKE_UP,
+  CENTER,
+  MOVE_RIGHT,
+  MOVE_LEFT,
+  BLINK,
+  HAPPY,
+  BLINK_FAST,
+  ALL_MOTIONS
+};
+
+AnimationState current_state = WAKE_UP;
+
+// Function declarations
+void initialize_eye_state();
 void draw_eyes(bool update = true);
 void center_eyes(bool update = true);
-void blink(int speed = 12);
+void blink(int speed);
 void sleep();
 void wakeup();
 void happy_eye();
 void saccade(int direction_x, int direction_y);
-void move_right_big_eye();
-void move_left_big_eye();
-void move_big_eye(int direction); // 声明 move_big_eye 函数
+void move_big_eye(int direction);
+void perform_all_motions();
+
+void initialize_eye_state() {
+  eye_state.left_eye_height = config.ref_eye_height;
+  eye_state.left_eye_width = config.ref_eye_width;
+  eye_state.right_eye_height = config.ref_eye_height;
+  eye_state.right_eye_width = config.ref_eye_width;
+  eye_state.left_eye_x = SCREEN_WIDTH / 2 - config.ref_eye_width / 2 - config.ref_space_between_eye / 2;
+  eye_state.left_eye_y = SCREEN_HEIGHT / 2;
+  eye_state.right_eye_x = SCREEN_WIDTH / 2 + config.ref_eye_width / 2 + config.ref_space_between_eye / 2;
+  eye_state.right_eye_y = SCREEN_HEIGHT / 2;
+}
 
 void draw_eyes(bool update) {
   display.clearDisplay();
-  int x = int(left_eye_x - left_eye_width / 2);
-  int y = int(left_eye_y - left_eye_height / 2);
-  display.fillRoundRect(x, y, left_eye_width, left_eye_height, ref_corner_radius, SSD1306_WHITE);
+  int x = int(eye_state.left_eye_x - eye_state.left_eye_width / 2);
+  int y = int(eye_state.left_eye_y - eye_state.left_eye_height / 2);
+  display.fillRoundRect(x, y, eye_state.left_eye_width, eye_state.left_eye_height, config.ref_corner_radius, SSD1306_WHITE);
   
-  x = int(right_eye_x - right_eye_width / 2);
-  y = int(right_eye_y - right_eye_height / 2);
-  display.fillRoundRect(x, y, right_eye_width, right_eye_height, ref_corner_radius, SSD1306_WHITE);
+  x = int(eye_state.right_eye_x - eye_state.right_eye_width / 2);
+  y = int(eye_state.right_eye_y - eye_state.right_eye_height / 2);
+  display.fillRoundRect(x, y, eye_state.right_eye_width, eye_state.right_eye_height, config.ref_corner_radius, SSD1306_WHITE);
   
   if (update) {
     display.display();
@@ -53,113 +92,108 @@ void draw_eyes(bool update) {
 }
 
 void center_eyes(bool update) {
-  left_eye_height = ref_eye_height;
-  left_eye_width = ref_eye_width;
-  right_eye_height = ref_eye_height;
-  right_eye_width = ref_eye_width;
-  left_eye_x = SCREEN_WIDTH / 2 - ref_eye_width / 2 - ref_space_between_eye / 2;
-  left_eye_y = SCREEN_HEIGHT / 2;
-  right_eye_x = SCREEN_WIDTH / 2 + ref_eye_width / 2 + ref_space_between_eye / 2;
-  right_eye_y = SCREEN_HEIGHT / 2;
+  initialize_eye_state();
   draw_eyes(update);
 }
 
 void blink(int speed) {
-  draw_eyes();
   for (int i = 0; i < 3; i++) {
-    left_eye_height -= speed;
-    right_eye_height -= speed;
+    eye_state.left_eye_height -= speed;
+    eye_state.right_eye_height -= speed;
     draw_eyes();
-    delay(50); // 增加延迟
+    delay(50);
   }
   for (int i = 0; i < 3; i++) {
-    left_eye_height += speed;
-    right_eye_height += speed;
+    eye_state.left_eye_height += speed;
+    eye_state.right_eye_height += speed;
     draw_eyes();
-    delay(50); // 增加延迟
+    delay(50);
   }
 }
 
 void sleep() {
-  left_eye_height = 2;
-  right_eye_height = 2;
+  eye_state.left_eye_height = 2;
+  eye_state.right_eye_height = 2;
   draw_eyes(true);
 }
 
 void wakeup() {
   sleep();
-  for (int h = 0; h <= ref_eye_height; h += 2) {
-    left_eye_height = h;
-    right_eye_height = h;
+  for (int h = 0; h <= config.ref_eye_height; h += 2) {
+    eye_state.left_eye_height = h;
+    eye_state.right_eye_height = h;
     draw_eyes(true);
-    delay(20); // 减少延迟
+    delay(20);
   }
 }
 
 void happy_eye() {
   center_eyes(false);
-  int offset = ref_eye_height / 2;
+  int offset = config.ref_eye_height / 2;
   for (int i = 0; i < 10; i++) {
-    display.fillTriangle(left_eye_x - left_eye_width / 2 - 1, left_eye_y + offset, left_eye_x + left_eye_width / 2 + 1, left_eye_y + 5 + offset, left_eye_x - left_eye_width / 2 - 1, left_eye_y + left_eye_height + offset, SSD1306_BLACK);
-    display.fillTriangle(right_eye_x + right_eye_width / 2 + 1, right_eye_y + offset, right_eye_x - left_eye_width / 2 - 1, right_eye_y + 5 + offset, right_eye_x + right_eye_width / 2 + 1, right_eye_y + right_eye_height + offset, SSD1306_BLACK);
+    display.fillTriangle(eye_state.left_eye_x - eye_state.left_eye_width / 2 - 1, eye_state.left_eye_y + offset,
+                         eye_state.left_eye_x + eye_state.left_eye_width / 2 + 1, eye_state.left_eye_y + 5 + offset,
+                         eye_state.left_eye_x - eye_state.left_eye_width / 2 - 1, eye_state.left_eye_y + eye_state.left_eye_height + offset, SSD1306_BLACK);
+    display.fillTriangle(eye_state.right_eye_x + eye_state.right_eye_width / 2 + 1, eye_state.right_eye_y + offset,
+                         eye_state.right_eye_x - eye_state.left_eye_width / 2 - 1, eye_state.right_eye_y + 5 + offset,
+                         eye_state.right_eye_x + eye_state.right_eye_width / 2 + 1, eye_state.right_eye_y + eye_state.right_eye_height + offset, SSD1306_BLACK);
     offset -= 2;
     display.display();
-    delay(50); // 增加延迟
+    delay(50);
   }
   display.display();
   delay(1000);
 }
 
 void saccade(int direction_x, int direction_y) {
-  int direction_x_movement_amplitude = 8;
-  int direction_y_movement_amplitude = 6;
-  int blink_amplitude = 8;
-  left_eye_x += direction_x_movement_amplitude * direction_x;
-  right_eye_x += direction_x_movement_amplitude * direction_x;
-  left_eye_y += direction_y_movement_amplitude * direction_y;
-  right_eye_y += direction_y_movement_amplitude * direction_y;
-  left_eye_height -= blink_amplitude;
-  right_eye_height -= blink_amplitude;
+  eye_state.left_eye_x += config.saccade_amplitude_x * direction_x;
+  eye_state.right_eye_x += config.saccade_amplitude_x * direction_x;
+  eye_state.left_eye_y += config.saccade_amplitude_y * direction_y;
+  eye_state.right_eye_y += config.saccade_amplitude_y * direction_y;
+  eye_state.left_eye_height -= config.blink_speed;
+  eye_state.right_eye_height -= config.blink_speed;
   draw_eyes();
-  delay(50); // 增加延迟
-  left_eye_x += direction_x_movement_amplitude * direction_x;
-  right_eye_x += direction_x_movement_amplitude * direction_x;
-  left_eye_y += direction_y_movement_amplitude * direction_y;
-  right_eye_y += direction_y_movement_amplitude * direction_y;
-  left_eye_height += blink_amplitude;
-  right_eye_height += blink_amplitude;
+  delay(50);
+  
+  eye_state.left_eye_x += config.saccade_amplitude_x * direction_x;
+  eye_state.right_eye_x += config.saccade_amplitude_x * direction_x;
+  eye_state.left_eye_y += config.saccade_amplitude_y * direction_y;
+  eye_state.right_eye_y += config.saccade_amplitude_y * direction_y;
+  eye_state.left_eye_height += config.blink_speed;
+  eye_state.right_eye_height += config.blink_speed;
   draw_eyes();
-  delay(50); // 增加延迟
-}
-
-void move_right_big_eye() {
-  move_big_eye(1);
-}
-
-void move_left_big_eye() {
-  move_big_eye(-1);
+  delay(50);
 }
 
 void move_big_eye(int direction) {
-  int direction_movement_amplitude = 2;
-  int blink_amplitude = 5;
   for (int i = 0; i < 3; i++) {
-    left_eye_x += direction_movement_amplitude * direction;
-    right_eye_x += direction_movement_amplitude * direction;
-    left_eye_height -= blink_amplitude;
-    right_eye_height -= blink_amplitude;
+    eye_state.left_eye_x += config.big_eye_movement_amplitude * direction;
+    eye_state.right_eye_x += config.big_eye_movement_amplitude * direction;
+    eye_state.left_eye_height -= config.blink_speed;
+    eye_state.right_eye_height -= config.blink_speed;
     draw_eyes();
-    delay(100); // 增加延迟
+    delay(100);
   }
   for (int i = 0; i < 3; i++) {
-    left_eye_x += direction_movement_amplitude * direction;
-    right_eye_x += direction_movement_amplitude * direction;
-    left_eye_height += blink_amplitude;
-    right_eye_height += blink_amplitude;
+    eye_state.left_eye_x += config.big_eye_movement_amplitude * direction;
+    eye_state.right_eye_x += config.big_eye_movement_amplitude * direction;
+    eye_state.left_eye_height += config.blink_speed;
+    eye_state.right_eye_height += config.blink_speed;
     draw_eyes();
-    delay(100); // 增加延迟
+    delay(100);
   }
   center_eyes();
+}
+
+void perform_all_motions() {
+  Serial.println("All Motion!");
+  saccade(-1, 1); delay(300);
+  saccade(1, 1); delay(300);
+  saccade(1, 0); delay(300);
+  saccade(1, -1); delay(300);
+  saccade(0, -1); delay(300);
+  saccade(-1, -1); delay(300);
+  saccade(-1, 0); delay(300);
 }
 
 void setup() {
@@ -169,45 +203,38 @@ void setup() {
     for (;;);
   }
   display.clearDisplay();
+  initialize_eye_state();
 }
 
 void loop() {
-  switch (count) {
-    case 0:
+  switch (current_state) {
+    case WAKE_UP:
       wakeup();
       break;
-    case 1:
+    case CENTER:
       center_eyes(true);
       break;
-    case 2:
-      move_right_big_eye();
+    case MOVE_RIGHT:
+      move_big_eye(1);
       break;
-    case 3:
-      move_left_big_eye();
+    case MOVE_LEFT:
+      move_big_eye(-1);
       break;
-    case 4:
-      blink(10);
+    case BLINK:
+      blink(config.blink_speed);
       break;
-    case 5:
+    case HAPPY:
       happy_eye();
       break;
-    case 6:
-      blink(20);
+    case BLINK_FAST:
+      blink(config.blink_speed * 2);
       break;
-    case 7:
-      Serial.println("All Motion!");
-      saccade(-1, 1); delay(300);
-      saccade(1, 1); delay(300);
-      saccade(1, 0); delay(300);
-      saccade(1, -1); delay(300);
-      saccade(0, -1); delay(300);
-      saccade(-1, -1); delay(300);
-      saccade(-1, 0); delay(300);
-      break;
-    default:
+    case ALL_MOTIONS:
+      perform_all_motions();
       break;
   }
-  count += 1;
-  if (count == 8) { count = 0; }
-  delay(2000); // 每隔2秒切换到下一个动作
+  
+  // Move to the next state
+  current_state = static_cast<AnimationState>((current_state + 1) % 8);
+  delay(config.animation_delay);
 }
