@@ -64,7 +64,10 @@ enum AnimationState {
   THINKING_EYES,
   DERP_EYES,
   ROLLING_EYES,
-  SQUINT_EYES
+  SQUINT_EYES,
+  STARRY_EYES,
+  SLEEPY_WITH_ZZZ,
+  SWEAT_EYES,
 };
 AnimationState current_state = WAKE_UP;
 bool animation_complete = true;
@@ -101,9 +104,9 @@ void thinking_eyes();
 void derp_eyes();
 void rolling_eyes();
 void squint_eyes();
-
-
-
+void stary_eyes();
+void sleepy_with_zz(); 
+void sweat_eyes();
 void initialize_eye_state() {
   eye_state.left_eye_height = config.ref_eye_height;
   eye_state.left_eye_width = config.ref_eye_width;
@@ -491,6 +494,51 @@ void squint_eyes() {
   delay(1000);
   center_eyes(true);
 }
+// 定义星星的 16x16 位图
+const unsigned char star_bitmap[] PROGMEM = {
+  0x00, 0x18, 0x3C, 0x7E, 0xFF, 0x7E, 0x3C, 0x18,
+  0x18, 0x3C, 0x7E, 0xFF, 0x7E, 0x3C, 0x18, 0x00
+};
+
+// 添加 starry_eyes 函数
+void starry_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    display.fillCircle(eye_state.left_eye_x, eye_state.left_eye_y, config.ref_eye_width / 2, SSD1306_BLACK);
+    display.drawBitmap(eye_state.left_eye_x - 8, eye_state.left_eye_y - 8, star_bitmap, 16, 16, SSD1306_WHITE);
+
+    display.fillCircle(eye_state.right_eye_x, eye_state.right_eye_y, config.ref_eye_width / 2, SSD1306_BLACK);
+    display.drawBitmap(eye_state.right_eye_x - 8, eye_state.right_eye_y - 8, star_bitmap, 16, 16, SSD1306_WHITE);
+
+    display.display();
+    delay(100);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void sleepy_with_zzz() {
+  center_eyes(false);
+  for (int i = 0; i < 5; i++) {
+    eye_state.left_eye_height -= 4;
+    eye_state.right_eye_height -= 4;
+    draw_eyes(true);
+    delay(100);
+  }
+  display.setCursor(SCREEN_WIDTH - 20, SCREEN_HEIGHT / 4);
+  display.print("Zzz");
+  display.display();
+  delay(2000);
+  center_eyes(true);
+}
+void sweat_eyes() {
+  center_eyes(false);
+  display.fillCircle(eye_state.left_eye_x + 10, eye_state.left_eye_y - 10, 3, SSD1306_WHITE); // 左眼冒汗
+  display.fillCircle(eye_state.right_eye_x + 10, eye_state.right_eye_y - 10, 3, SSD1306_WHITE); // 右眼冒汗
+  display.display();
+  delay(1000);
+  center_eyes(true);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -587,6 +635,15 @@ void loop() {
     case SQUINT_EYES:
       squint_eyes();
       break;
+    case STARRY_EYES:
+      starry_eyes();
+      break;
+    case SLEEPY_WITH_ZZZ:
+      sleepy_with_zzz();
+      break;
+   case SWEAT_EYES:
+      sweat_eyes();
+  break;  
   }
 
   // 检查动画是否完成
