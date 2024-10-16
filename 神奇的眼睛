@@ -1,7 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-
+#include<Arduino.h>
 // Display configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -24,7 +24,6 @@ struct Config {
 };
 
 Config config;
-
 // Current state of the eyes
 struct EyeState {
   int left_eye_height;
@@ -48,10 +47,30 @@ enum AnimationState {
   BLINK,
   HAPPY,
   BLINK_FAST,
-  ALL_MOTIONS
+  ALL_MOTIONS,
+  SURPRISED,
+  SLEEPY,
+  ANGRY,
+  LOVE,
+  WINK_WITH_SMILE,
+  SHY_EYES,
+  EXCITED_EYES,
+  CURIOUS_EYES,
+  CONFUSED_EYES,
+  SLEEPY_BLINK,
+  SURPRISED_WITH_SMILE,
+  ANGRY_WITH_FURROWED_BROW,
+  LOVE_WITH_HEARTS,
+  THINKING_EYES,
+  DERP_EYES,
+  ROLLING_EYES,
+  SQUINT_EYES
 };
-
 AnimationState current_state = WAKE_UP;
+bool animation_complete = true;
+unsigned long animation_start_time = 0;
+const unsigned long ANIMATION_DURATION = 3000; // 3 seconds for each animation
+
 
 // Function declarations
 void initialize_eye_state();
@@ -64,6 +83,26 @@ void happy_eye();
 void saccade(int direction_x, int direction_y);
 void move_big_eye(int direction);
 void perform_all_motions();
+void surprised_eyes();
+void sleepy_eyes();
+void angry_eyes();
+void love_eyes();
+void wink();
+void wink_with_smile();
+void shy_eyes();
+void excited_eyes();
+void curious_eyes();
+void confused_eyes();
+void sleepy_blink();
+void surprised_with_smile();
+void angry_with_furrowed_brow();
+void love_with_hearts();
+void thinking_eyes();
+void derp_eyes();
+void rolling_eyes();
+void squint_eyes();
+
+
 
 void initialize_eye_state() {
   eye_state.left_eye_height = config.ref_eye_height;
@@ -196,6 +235,263 @@ void perform_all_motions() {
   saccade(-1, 0); delay(300);
 }
 
+void surprised_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_height += 2;
+    eye_state.right_eye_height += 2;
+    eye_state.left_eye_width += 2;
+    eye_state.right_eye_width += 2;
+    draw_eyes(true);
+    delay(20);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void sleepy_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 5; i++) {
+    eye_state.left_eye_height -= 4;
+    eye_state.right_eye_height -= 4;
+    draw_eyes(true);
+    delay(100);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void angry_eyes() {
+  center_eyes(false);
+  int offset = config.ref_eye_height / 4;
+  for (int i = 0; i < 10; i++) {
+    display.fillTriangle(eye_state.left_eye_x - eye_state.left_eye_width / 2, eye_state.left_eye_y - offset,
+                         eye_state.left_eye_x + eye_state.left_eye_width / 2, eye_state.left_eye_y + 5 - offset,
+                         eye_state.left_eye_x - eye_state.left_eye_width / 2, eye_state.left_eye_y + eye_state.left_eye_height - offset, SSD1306_BLACK);
+    display.fillTriangle(eye_state.right_eye_x + eye_state.right_eye_width / 2, eye_state.right_eye_y - offset,
+                         eye_state.right_eye_x - eye_state.right_eye_width / 2, eye_state.right_eye_y + 5 - offset,
+                         eye_state.right_eye_x + eye_state.right_eye_width / 2, eye_state.right_eye_y + eye_state.right_eye_height - offset, SSD1306_BLACK);
+    offset -= 1;
+    display.display();
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void love_eyes() {
+  center_eyes(false);
+  int heart_size = config.ref_eye_width / 2;
+  for (int i = 0; i < 10; i++) {
+    display.fillCircle(eye_state.left_eye_x - heart_size/2, eye_state.left_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillCircle(eye_state.left_eye_x + heart_size/2, eye_state.left_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillTriangle(eye_state.left_eye_x - heart_size, eye_state.left_eye_y,
+                         eye_state.left_eye_x + heart_size, eye_state.left_eye_y,
+                         eye_state.left_eye_x, eye_state.left_eye_y + heart_size, SSD1306_WHITE);
+    
+    display.fillCircle(eye_state.right_eye_x - heart_size/2, eye_state.right_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillCircle(eye_state.right_eye_x + heart_size/2, eye_state.right_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillTriangle(eye_state.right_eye_x - heart_size, eye_state.right_eye_y,
+                         eye_state.right_eye_x + heart_size, eye_state.right_eye_y,
+                         eye_state.right_eye_x, eye_state.right_eye_y + heart_size, SSD1306_WHITE);
+    
+    display.display();
+    delay(100);
+    heart_size--;
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void wink() {
+  for (int i = 0; i < 3; i++) {
+    eye_state.left_eye_height -= config.blink_speed;
+    draw_eyes();
+    delay(50);
+  }
+  for (int i = 0; i < 3; i++) {
+    eye_state.left_eye_height += config.blink_speed;
+    draw_eyes();
+    delay(50);
+  }
+}
+
+void wink_with_smile() {
+  for (int i = 0; i < 3; i++) {
+    eye_state.left_eye_height -= config.blink_speed;
+    draw_eyes();
+    delay(50);
+  }
+  for (int i = 0; i < 3; i++) {
+    eye_state.left_eye_height += config.blink_speed;
+    draw_eyes();
+    delay(50);
+  }
+  happy_eye();
+}
+
+void shy_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_y += 2;
+    eye_state.right_eye_y += 2;
+    draw_eyes(true);
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void excited_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_height += 2;
+    eye_state.right_eye_height += 2;
+    eye_state.left_eye_width += 2;
+    eye_state.right_eye_width += 2;
+    draw_eyes(true);
+    delay(50);
+  }
+  blink(config.blink_speed * 2);
+  center_eyes(true);
+}
+
+void curious_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_x += 1;
+    eye_state.right_eye_x -= 1;
+    draw_eyes(true);
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void confused_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_x += 1;
+    eye_state.right_eye_x += 1;
+    draw_eyes(true);
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void sleepy_blink() {
+  for (int i = 0; i < 3; i++) {
+    eye_state.left_eye_height -= config.blink_speed / 2;
+    eye_state.right_eye_height -= config.blink_speed / 2;
+    draw_eyes();
+    delay(100);
+  }
+  for (int i = 0; i < 3; i++) {
+    eye_state.left_eye_height += config.blink_speed / 2;
+    eye_state.right_eye_height += config.blink_speed / 2;
+    draw_eyes();
+    delay(100);
+  }
+}
+
+void surprised_with_smile() {
+  surprised_eyes();
+  happy_eye();
+}
+
+void angry_with_furrowed_brow() {
+  angry_eyes();
+  int offset = config.ref_eye_height / 4;
+  for (int i = 0; i < 10; i++) {
+    display.drawLine(eye_state.left_eye_x - eye_state.left_eye_width / 2, eye_state.left_eye_y - offset,
+                     eye_state.left_eye_x + eye_state.left_eye_width / 2, eye_state.left_eye_y - offset, SSD1306_WHITE);
+    display.drawLine(eye_state.right_eye_x - eye_state.right_eye_width / 2, eye_state.right_eye_y - offset,
+                     eye_state.right_eye_x + eye_state.right_eye_width / 2, eye_state.right_eye_y - offset, SSD1306_WHITE);
+    offset -= 1;
+    display.display();
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void love_with_hearts() {
+  love_eyes();
+  int heart_size = config.ref_eye_width / 2;
+  for (int i = 0; i < 10; i++) {
+    display.fillCircle(eye_state.left_eye_x - heart_size/2, eye_state.left_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillCircle(eye_state.left_eye_x + heart_size/2, eye_state.left_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillTriangle(eye_state.left_eye_x - heart_size, eye_state.left_eye_y,
+                         eye_state.left_eye_x + heart_size, eye_state.left_eye_y,
+                         eye_state.left_eye_x, eye_state.left_eye_y + heart_size, SSD1306_WHITE);
+    
+    display.fillCircle(eye_state.right_eye_x - heart_size/2, eye_state.right_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillCircle(eye_state.right_eye_x + heart_size/2, eye_state.right_eye_y, heart_size/2, SSD1306_WHITE);
+    display.fillTriangle(eye_state.right_eye_x - heart_size, eye_state.right_eye_y,
+                         eye_state.right_eye_x + heart_size, eye_state.right_eye_y,
+                         eye_state.right_eye_x, eye_state.right_eye_y + heart_size, SSD1306_WHITE);
+    
+    display.display();
+    delay(100);
+    heart_size--;
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+void thinking_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_y -= 2;
+    eye_state.right_eye_y -= 2;
+    draw_eyes(true);
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
+
+
+void derp_eyes() {
+  center_eyes(false);
+  eye_state.left_eye_y -= 10;
+  eye_state.right_eye_y += 10;
+  draw_eyes(true);
+  delay(2000);
+  center_eyes(true);
+}
+
+void rolling_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 360; i += 10) {
+    int x = cos(radians(i)) * 10;
+    int y = sin(radians(i)) * 10;
+    eye_state.left_eye_x = SCREEN_WIDTH / 2 - config.ref_eye_width / 2 - config.ref_space_between_eye / 2 + x;
+    eye_state.left_eye_y = SCREEN_HEIGHT / 2 + y;
+    eye_state.right_eye_x = SCREEN_WIDTH / 2 + config.ref_eye_width / 2 + config.ref_space_between_eye / 2 + x;
+    eye_state.right_eye_y = SCREEN_HEIGHT / 2 + y;
+    draw_eyes(true);
+    delay(50);
+  }
+  center_eyes(true);
+}
+
+void squint_eyes() {
+  center_eyes(false);
+  for (int i = 0; i < 10; i++) {
+    eye_state.left_eye_height -= 2;
+    eye_state.right_eye_height -= 2;
+    eye_state.left_eye_width += 1;
+    eye_state.right_eye_width += 1;
+    draw_eyes(true);
+    delay(50);
+  }
+  delay(1000);
+  center_eyes(true);
+}
+
 void setup() {
   Serial.begin(115200);
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
@@ -204,9 +500,17 @@ void setup() {
   }
   display.clearDisplay();
   initialize_eye_state();
+  randomSeed(analogRead(0));
 }
 
 void loop() {
+  if (animation_complete) {
+    // 随机选择下一个状态
+    current_state = static_cast<AnimationState>(random(0, 25)); // 更新为新的动画数量
+    animation_complete = false;
+    animation_start_time = millis();
+  }
+
   switch (current_state) {
     case WAKE_UP:
       wakeup();
@@ -232,9 +536,68 @@ void loop() {
     case ALL_MOTIONS:
       perform_all_motions();
       break;
+    case SURPRISED:
+      surprised_eyes();
+      break;
+    case SLEEPY:
+      sleepy_eyes();
+      break;
+    case ANGRY:
+      angry_eyes();
+      break;
+    case LOVE:
+      love_eyes();
+      break;
+    case WINK_WITH_SMILE:
+      wink_with_smile();
+      break;
+    case SHY_EYES:
+      shy_eyes();
+      break;
+    case EXCITED_EYES:
+      excited_eyes();
+      break;
+    case CURIOUS_EYES:
+      curious_eyes();
+      break;
+    case CONFUSED_EYES:
+      confused_eyes();
+      break;
+    case SLEEPY_BLINK:
+      sleepy_blink();
+      break;
+    case SURPRISED_WITH_SMILE:
+      surprised_with_smile();
+      break;
+    case ANGRY_WITH_FURROWED_BROW:
+      angry_with_furrowed_brow();
+      break;
+    case LOVE_WITH_HEARTS:
+      love_with_hearts();
+      break;
+    case THINKING_EYES:
+      thinking_eyes();
+      break;
+    case DERP_EYES:
+      derp_eyes();
+      break;
+    case ROLLING_EYES:
+      rolling_eyes();
+      break;
+    case SQUINT_EYES:
+      squint_eyes();
+      break;
   }
-  
-  // Move to the next state
-  current_state = static_cast<AnimationState>((current_state + 1) % 8);
-  delay(config.animation_delay);
+
+  // 检查动画是否完成
+  if (millis() - animation_start_time >= ANIMATION_DURATION) {
+    animation_complete = true;
+  }
+
+  // 有小概率眨眼
+  if (random(0, 100) < 5) {
+    wink();
+  }
+
+  delay(50); // 小延迟以避免过快刷新
 }
