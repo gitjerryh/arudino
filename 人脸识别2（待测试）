@@ -1,0 +1,93 @@
+#include <Wire.h>
+
+#define HUSKYLENS_I2C_ADDRESS 0x32  // I2C address for HuskyLens
+
+// Command Definitions
+#define COMMAND_REQUEST_ALGORITHM 0x2D
+#define COMMAND_RETURN_OK 0x2E
+#define ALGORITHM_FACE_RECOGNITION 0x0000
+
+void setup() {
+  Wire.begin(); // Start I2C communication
+  Serial.begin(9600); // Start serial communication for debugging
+
+  delay(1000); // Allow HuskyLens to initialize
+  setFaceRecognitionAlgorithm(); // Set HuskyLens to face recognition mode
+}
+
+void loop() {
+  // Request face detection and recognition
+  if (detectFace()) {
+    Serial.println("Face detected and recognized!");
+  } else {
+    Serial.println("No face detected.");
+  }
+  
+  delay(1000); // Wait before checking again
+}
+
+// Function to set HuskyLens to face recognition mode
+void setFaceRecognitionAlgorithm() {
+  Wire.beginTransmission(HUSKYLENS_I2C_ADDRESS);
+  Wire.write(0x55); // Header
+  Wire.write(0xAA); // Header 2
+  Wire.write(0x11); // Address
+  Wire.write(0x02); // Data Length
+  Wire.write(COMMAND_REQUEST_ALGORITHM); // Command to change algorithm
+  Wire.write(ALGORITHM_FACE_RECOGNITION & 0xFF); // Low byte of face recognition algorithm
+  Wire.write((ALGORITHM_FACE_RECOGNITION >> 8) & 0xFF); // High byte of face recognition algorithm
+  Wire.endTransmission();
+  
+  delay(100); // Small delay to allow the command to process
+
+  if (checkResponseOk()) {
+    Serial.println("HuskyLens set to face recognition mode.");
+  } else {
+    Serial.println("Failed to set HuskyLens to face recognition mode.");
+  }
+}
+
+// Function to detect face
+bool detectFace() {
+  Wire.beginTransmission(HUSKYLENS_I2C_ADDRESS);
+  Wire.write(0x55); // Header
+  Wire.write(0xAA); // Header 2
+  Wire.write(0x11); // Address
+  Wire.write(0x00); // Data Length (No extra data)
+  Wire.write(0x20); // Command: Request all blocks and arrows
+  Wire.endTransmission();
+
+  delay(100); // Give HuskyLens time to process the request
+
+  if (Wire.requestFrom(HUSKYLENS_I2C_ADDRESS, 6)) {
+    byte header1 = Wire.read();
+    byte header2 = Wire.read();
+    byte address = Wire.read();
+    byte dataLength = Wire.read();
+    byte command = Wire.read();
+
+    if (header1 == 0x55 && header2 == 0xAA && command == 0x29) {  // COMMAND_RETURN_INFO
+      return true;  // Face detected
+    }
+  }
+  
+  return false;  // No face detected
+}
+
+// Function to check if HuskyLens responds with OK
+bool checkResponseOk() {
+  Wire.requestFrom(HUSKYLENS_I2C_ADDRESS, 6);
+  while (Wire.available()) {
+    byte header1 = Wire.read();
+    byte header2 = Wire.read();
+    byte address = Wire.read();
+    byte dataLength = Wire.read();
+    byte command = Wire.read();
+
+    if (header1 == 0x55 && header2 == 0xAA && command == COMMAND_RETURN_OK) {
+      return true;
+    }
+  }
+  
+  return false;
+}
