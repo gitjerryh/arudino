@@ -1,0 +1,54 @@
+#include "HUSKYLENS.h"
+#include "SoftwareSerial.h"
+
+HUSKYLENS huskylens;
+SoftwareSerial mySerial(10, 11); // RX, TX
+
+void setup() {
+    Serial.begin(115200);
+    mySerial.begin(9600);
+    while (!huskylens.begin(mySerial))
+    {
+        Serial.println(F("Failed to initialize HuskyLens!"));
+        Serial.println(F("1.Please recheck the \"Protocol Type\" in HUSKYLENS (General Settings>>Protocol Type>>Serial 9600)"));
+        Serial.println(F("2.Please recheck the connection."));
+        delay(100);
+    }
+    
+    huskylens.writeAlgorithm(ALGORITHM_FACE_RECOGNITION); // 设置为人脸识别算法
+}
+
+void loop() {
+    if (!huskylens.request()) {
+        Serial.println(F("Fail to request data from HUSKYLENS, recheck the connection!"));
+        return;
+    }
+
+    if(!huskylens.isLearned()) {
+        Serial.println(F("Nothing learned, press learn button on HUSKYLENS to learn faces"));
+    }
+    else if(!huskylens.available()) {
+        Serial.println(F("No face detected"));
+    }
+    else
+    {
+        while (huskylens.available())
+        {
+            HUSKYLENSResult result = huskylens.read();
+            printResult(result);
+        }    
+    }
+}
+
+void printResult(HUSKYLENSResult result){
+    if (result.command == COMMAND_RETURN_BLOCK){
+        Serial.println(String()+F("Face ID: ")+result.ID);
+        Serial.println(String()+F("X Center: ")+result.xCenter);
+        Serial.println(String()+F("Y Center: ")+result.yCenter);
+        Serial.println(String()+F("Width: ")+result.width);
+        Serial.println(String()+F("Height: ")+result.height);
+    }
+    else{
+        Serial.println("Object unknown!");
+    }
+}
