@@ -1,0 +1,84 @@
+#include <Wire.h>
+#include <Arduino.h>
+
+// HUSKYLENS I2C地址
+#define HUSKYLENS_ADDRESS 0x32
+
+// 计算校验和的函数声明
+byte computeChecksum(byte command, uint16_t id);
+
+// 初始化 Arduino 的 I2C 接口
+void setup() {
+  Wire.begin(); // 初始化 I2C 通信
+  Serial.begin(115200); // 初始化串口通信，用于调试
+  delay(1000); // 延迟以确保一切都已启动
+}
+
+// 从 HUSKYLENS 请求特定 ID 的数据
+void requestDataByID(uint16_t id) {
+  Wire.beginTransmission(HUSKYLENS_ADDRESS);
+  Wire.write(0x55); // Header Byte 1
+  Wire.write(0xAA); // Header Byte 2
+  Wire.write(0x11); // Address (ignored by HUSKYLENS)
+  Wire.write(0x02); // Data Length
+  Wire.write(0x26); // Command: Request by ID
+  Wire.write(id & 0xFF); // Low byte of ID
+  Wire.write((id >> 8) & 0xFF); // High byte of ID
+  Wire.write(computeChecksum(0x26, id)); // 计算校验和
+  Wire.endTransmission();
+}
+
+// 计算校验和
+byte computeChecksum(byte command, uint16_t id) {
+  byte checksum = 0;
+  checksum += 0x55;
+  checksum += 0xAA;
+  checksum += 0x11;
+  checksum += 0x02;
+  checksum += command;
+  checksum += (id & 0xFF);
+  checksum += ((id >> 8) & 0xFF);
+  return checksum;
+}
+
+// 读取 HUSKYLENS 的响应
+bool readHuskyLensResponse() {
+  Wire.requestFrom(HUSKYLENS_ADDRESS, 5);
+  if (Wire.available() >= 5) {
+    byte header1 = Wire.read();
+    byte header2 = Wire.read();
+    byte address = Wire.read();
+    byte dataLength = Wire.read();
+    byte command = Wire.read();
+
+    // 检查是否返回了有效的响应
+    if (header1 == 0x55 && header2 == 0xAA && command == 0x29) {
+      // 读取 Info 数据
+      Wire.requestFrom(HUSKYLENS_ADDRESS, 10);
+      if (Wire.available() >= 10) {
+        uint16_t blocks = Wire.read() | (Wire.read() << 8);
+        uint16_t parameter = Wire.read() | (Wire.read() << 8);
+        uint16_t valid = Wire.read() | (Wire.read() << 8);
+        uint16_t frame = Wire.read() | (Wire.read() << 8);
+        uint16_t detected = Wire.read() | (Wire.read() << 8);
+
+        // 如果检测到ID为0的人脸
+        if (blocks > 0 && detected == 0) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+void loop() {
+  requestDataByID(0); // 请求 ID 为 0 的人脸识别数据
+  delay(100); // 短暂延迟，等待 HUSKYLENS 响应
+
+  if (readHuskyLensResponse()) {
+    Serial.println("Facial recognition successful");
+  }
+
+  delay(1000); // 每秒请求一次数据
+}
