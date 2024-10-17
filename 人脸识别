@@ -1,9 +1,10 @@
 #include <Wire.h>
 #include <Arduino.h>
-
+#include "DFRobot_SpeechSynthesis_V2.h"
 // HUSKYLENS I2C地址
 #define HUSKYLENS_ADDRESS 0x32
 
+DFRobot_SpeechSynthesis_I2C ss;
 // 计算校验和的函数声明
 byte computeChecksum(byte command, uint16_t id);
 
@@ -12,6 +13,12 @@ void setup() {
   Wire.begin(); // 初始化 I2C 通信
   Serial.begin(115200); // 初始化串口通信，用于调试
   delay(1000); // 延迟以确保一切都已启动
+// 初始化语音合成传感器
+ss.begin();
+ss.setVolume(5); // 设置语音的音量大小为5
+ss.setSpeed(5); // 设置语音的播放速度为5
+ss.setTone(5); // 设置音调为5
+
 }
 
 // 从 HUSKYLENS 请求特定 ID 的数据
@@ -78,6 +85,7 @@ void loop() {
 
   if (readHuskyLensResponse()) {
     Serial.println("Facial recognition successful");
+    ss.speak(F("主人，我终于找到你了"));
   }
 
   delay(1000); // 每秒请求一次数据
