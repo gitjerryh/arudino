@@ -58,12 +58,13 @@ void setup() {
 
 void loop() {
   // 颜色渐变
-  fadeColor(255, 0, 0, 255, 255, 0, 50, 20);  // 红到黄
-  fadeColor(255, 255, 0, 0, 255, 0, 50, 20);  // 黄到绿
-  fadeColor(0, 255, 0, 0, 255, 255, 50, 20);  // 绿到青
-  fadeColor(0, 255, 255, 0, 0, 255, 50, 20);  // 青到蓝
-  fadeColor(0, 0, 255, 255, 0, 255, 50, 20);  // 蓝到紫
-  fadeColor(255, 0, 255, 255, 0, 0, 50, 20);  // 紫到红
+  int delayTime = 25; // 修改此值可以改变颜色过渡速度
+    fadeColor(255, 0, 0, 255, 255, 0, 50, delayTime);  // 红到黄
+    fadeColor(255, 255, 0, 0, 255, 0, 50, delayTime);  // 黄到绿
+    fadeColor(0, 255, 0, 0, 255, 255, 50, delayTime);  // 绿到青
+    fadeColor(0, 255, 255, 0, 0, 255, 50, delayTime);  // 青到蓝
+    fadeColor(0, 0, 255, 255, 0, 255, 50, delayTime);  // 蓝到紫
+    fadeColor(255, 0, 255, 255, 0, 0, 50, delayTime);  // 紫到红
   
   // 动画效果
   for (int i = 0; i < 3; i++) {
