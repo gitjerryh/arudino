@@ -1,0 +1,110 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+#include <TimeLib.h>
+#include <Wire.h>
+#include "DFRobot_RGBLCD1602.h"
+
+const char *ssid     = "OnePlus 10 Pro";
+const char *password = "55132768";
+
+DFRobot_RGBLCD1602 lcd(0x2D, 16, 2);  // RGB controller address is 0x2D, 16 columns, 2 rows
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
+
+const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+
+unsigned long lastUpdate = 0;
+int colorIndex = 0;
+const int numColors = 6;
+const int colors[numColors][3] = {
+  {255, 0, 0},    // Red
+  {255, 255, 0},  // Yellow
+  {0, 255, 0},    // Green
+  {0, 255, 255},  // Cyan
+  {0, 0, 255},    // Blue
+  {255, 0, 255}   // Magenta
+};
+
+void setColor(int r, int g, int b) {
+  lcd.setPWM(lcd.REG_RED, r);
+  lcd.setPWM(lcd.REG_GREEN, g);
+  lcd.setPWM(lcd.REG_BLUE, b);
+}
+
+void setup() {
+  Serial.begin(115200);  // Start serial communication for debugging
+  
+  lcd.init();
+  lcd.clear();
+  
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    lcd.setCursor(0, 0);
+    lcd.print("Connecting WiFi");
+    Serial.println("Connecting to WiFi...");
+  }
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi connected");
+  Serial.println("Connected to WiFi");
+  delay(2000);
+  
+  timeClient.begin();
+  timeClient.setTimeOffset(28800);  // Set your time zone offset here in seconds (e.g., 3600 for GMT+1)
+  
+  // Force NTP sync
+  while(!timeClient.update()) {
+    timeClient.forceUpdate();
+    Serial.println("Forcing NTP update...");
+    delay(500);
+  }
+  
+  Serial.println("NTP Synchronized");
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  
+  // Update time every second
+  if (currentMillis - lastUpdate >= 1000) {
+    lastUpdate = currentMillis;
+    
+    timeClient.update();
+    time_t epochTime = timeClient.getEpochTime();
+    struct tm *ptm = localtime ((time_t *)&epochTime);  // Use localtime instead of gmtime
+
+    int currentMonth = ptm->tm_mon;
+    int currentDay = ptm->tm_mday;
+    int currentDayOfWeek = ptm->tm_wday;
+    int currentHour = ptm->tm_hour;
+    int currentMinute = ptm->tm_min;
+    int currentSecond = ptm->tm_sec;
+
+    lcd.setCursor(0, 0);
+    lcd.printf("%s %02d %s", monthNames[currentMonth], currentDay, dayNames[currentDayOfWeek]);
+    
+    lcd.setCursor(0, 1);
+    lcd.printf("%02d:%02d:%02d", currentHour, currentMinute, currentSecond);
+
+    // Print debug info to Serial
+    Serial.printf("Current time: %s %02d %s %02d:%02d:%02d\n", 
+                  monthNames[currentMonth], currentDay, dayNames[currentDayOfWeek],
+                  currentHour, currentMinute, currentSecond);
+
+    // Gradually change color
+    colorIndex = (colorIndex + 1) % numColors;
+    int nextColorIndex = (colorIndex + 1) % numColors;
+    float t = (currentMillis % 1000) / 1000.0;
+    
+    int r = colors[colorIndex][0] * (1-t) + colors[nextColorIndex][0] * t;
+    int g = colors[colorIndex][1] * (1-t) + colors[nextColorIndex][1] * t;
+    int b = colors[colorIndex][2] * (1-t) + colors[nextColorIndex][2] * t;
+    
+    setColor(r, g, b);
+  }
+}
