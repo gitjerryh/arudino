@@ -3,88 +3,192 @@
 #include "DFRobot_RGBLCD1602.h"
 
 GravityRtc rtc;
-DFRobot_RGBLCD1602 lcd(0x2D, 16, 2);  // RGB controller address is 0x2D, 16 columns, 2 rows
+DFRobot_RGBLCD1602 lcd(0x2D, 16, 2);
 
 const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
 unsigned long lastUpdate = 0;
-int colorIndex = 0;
-const int numColors = 6;
-const int colors[numColors][3] = {
-  {255, 0, 0},    // Red
-  {255, 255, 0},  // Yellow
-  {0, 255, 0},    // Green
-  {0, 255, 255},  // Cyan
-  {0, 0, 255},    // Blue
-  {255, 0, 255}   // Magenta
+unsigned long lastColorChange = 0;
+unsigned long colorDuration = 0;
+unsigned long specialEffectStart = 0;
+int currentColor = 0;
+float breatheValue = 0;
+bool breatheIncreasing = true;
+bool inSpecialEffect = false;
+int specialEffectStep = 0;
+
+// 不同时段的颜色主题
+const int MORNING_COLORS[][3] = {
+  {255, 200, 100},  // 暖黄
+  {255, 150, 50},   // 橙色
+  {255, 180, 120},  // 晨光色
+  {200, 150, 100}   // 淡褐色
 };
 
-void setColor(int r, int g, int b) {
-  lcd.setPWM(lcd.REG_RED, r);
-  lcd.setPWM(lcd.REG_GREEN, g);
-  lcd.setPWM(lcd.REG_BLUE, b);
+const int DAY_COLORS[][3] = {
+  {100, 200, 255},  // 天蓝
+  {150, 255, 200},  // 淡绿
+  {255, 255, 200},  // 明黄
+  {200, 255, 255}   // 淡青
+};
+
+const int EVENING_COLORS[][3] = {
+  {255, 100, 100},  // 粉红
+  {255, 150, 50},   // 橙红
+  {200, 100, 150},  // 紫红
+  {150, 100, 200}   // 淡紫
+};
+
+const int NIGHT_COLORS[][3] = {
+  {50, 50, 150},    // 深蓝
+  {100, 50, 150},   // 靛蓝
+  {50, 100, 150},   // 蓝绿
+  {100, 100, 200}   // 淡蓝紫
+};
+
+const int SPECIAL_COLORS[][3] = {
+  {255, 255, 255},  // 白色
+  {255, 255, 0},    // 黄色
+  {255, 0, 0},      // 红色
+  {0, 255, 0},      // 绿色
+  {0, 0, 255}       // 蓝色
+};
+
+int currentThemeColors[4][3];
+int numThemeColors = 4;
+
+void setColor(int r, int g, int b, float intensity) {
+  lcd.setPWM(lcd.REG_RED, r * intensity);
+  lcd.setPWM(lcd.REG_GREEN, g * intensity);
+  lcd.setPWM(lcd.REG_BLUE, b * intensity);
+}
+
+void updateThemeColors(int hour) {
+  if (hour >= 6 && hour < 11) {  // 早晨
+    memcpy(currentThemeColors, MORNING_COLORS, sizeof(MORNING_COLORS));
+  } else if (hour >= 11 && hour < 17) {  // 白天
+    memcpy(currentThemeColors, DAY_COLORS, sizeof(DAY_COLORS));
+  } else if (hour >= 17 && hour < 20) {  // 傍晚
+    memcpy(currentThemeColors, EVENING_COLORS, sizeof(EVENING_COLORS));
+  } else {  // 夜晚
+    memcpy(currentThemeColors, NIGHT_COLORS, sizeof(NIGHT_COLORS));
+  }
+}
+
+void handleSpecialEffect(unsigned long currentMillis) {
+  if (!inSpecialEffect) return;
+  
+  const int effectDuration = 3000;  // 特效持续3秒
+  unsigned long elapsedTime = currentMillis - specialEffectStart;
+  
+  if (elapsedTime > effectDuration) {
+    inSpecialEffect = false;
+    return;
+  }
+
+  // 快速颜色切换特效
+  int step = (elapsedTime / 200) % 5;  // 每200ms切换一次颜色
+  setColor(
+    SPECIAL_COLORS[step][0],
+    SPECIAL_COLORS[step][1],
+    SPECIAL_COLORS[step][2],
+    1.0
+  );
 }
 
 void setup() {
-  Serial.begin(115200);  // Start serial communication for debugging
+  Serial.begin(115200);
   
   lcd.init();
   lcd.clear();
   
   rtc.setup();
-  // Set initial time when needed (uncomment and modify as needed):
+// Set initial time when needed (uncomment and modify as needed):
 //rtc.adjustRtc(F(__DATE__), F(__TIME__)); // Set from compile time
- // rtc.adjustRtc(2024,10,23,13,50,0,4);  // Set manually: Year,Month,Day,Hour,Minute,Second,Weekday
+  // rtc.adjustRtc(2024,10,23,13,50,0,4);  // 如需设置时间请取消注释
   
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("RTC initialized");
   Serial.println("RTC initialized");
   delay(2000);
+  
+  randomSeed(analogRead(0));
+  colorDuration = random(3000, 10000);
+  
+  // 初始化颜色主题
+  rtc.read();
+  updateThemeColors(rtc.hour);
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   
-  // Update time every second
+  // 更新时间显示
   if (currentMillis - lastUpdate >= 1000) {
     lastUpdate = currentMillis;
     
-    rtc.read();  // Read current time from RTC
-
-    // Display time on LCD
+    rtc.read();
+    
+    // 更新颜色主题
+    updateThemeColors(rtc.hour);
+    
+    // 检查是否整点
+    if (rtc.minute == 0 && rtc.second == 0) {
+      inSpecialEffect = true;
+      specialEffectStart = currentMillis;
+    }
+    
     lcd.setCursor(0, 0);
     lcd.printf("%s %02d %s", 
-              monthNames[rtc.month-1],  // Month names array is 0-based
+              monthNames[rtc.month-1],
               rtc.day, 
-              dayNames[rtc.week]);  // week is already 0-based (0=Sunday)
+              dayNames[rtc.week]);
     
     lcd.setCursor(0, 1);
     lcd.printf("%02d:%02d:%02d", 
               rtc.hour, 
               rtc.minute, 
               rtc.second);
-
-    // Print debug info to Serial
-    Serial.printf("Current time: %s %02d %s %02d:%02d:%02d\n", 
-                  monthNames[rtc.month-1], 
-                  rtc.day, 
-                  dayNames[rtc.week],
-                  rtc.hour, 
-                  rtc.minute, 
-                  rtc.second);
-
-    // Gradually change color
-    colorIndex = (colorIndex + 1) % numColors;
-    int nextColorIndex = (colorIndex + 1) % numColors;
-    float t = (currentMillis % 1000) / 1000.0;
-    
-    // Interpolate between current color and next color
-    int r = colors[colorIndex][0] * (1-t) + colors[nextColorIndex][0] * t;
-    int g = colors[colorIndex][1] * (1-t) + colors[nextColorIndex][1] * t;
-    int b = colors[colorIndex][2] * (1-t) + colors[nextColorIndex][2] * t;
-    
-    setColor(r, g, b);
   }
+  
+  // 处理整点特效
+  if (inSpecialEffect) {
+    handleSpecialEffect(currentMillis);
+    return;
+  }
+  
+  // 正常的呼吸效果和颜色切换
+  if (currentMillis - lastColorChange >= colorDuration) {
+    lastColorChange = currentMillis;
+    currentColor = (currentColor + 1) % numThemeColors;
+    colorDuration = random(3000, 10000);
+    breatheValue = 1.0;
+    breatheIncreasing = false;
+  }
+  
+  // 呼吸效果
+  float breatheSpeed = 0.0015;
+  if (breatheIncreasing) {
+    breatheValue += breatheSpeed;
+    if (breatheValue >= 1.0) {
+      breatheValue = 1.0;
+      breatheIncreasing = false;
+    }
+  } else {
+    breatheValue -= breatheSpeed;
+    if (breatheValue <= 0.3) {
+      breatheValue = 0.3;
+      breatheIncreasing = true;
+    }
+  }
+  
+  // 应用当前主题颜色和呼吸效果
+  setColor(
+    currentThemeColors[currentColor][0],
+    currentThemeColors[currentColor][1],
+    currentThemeColors[currentColor][2],
+    breatheValue
+  );
 }
