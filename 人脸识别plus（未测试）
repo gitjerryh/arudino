@@ -1,0 +1,138 @@
+#include "HUSKYLENS.h"
+#include "Wire.h"
+#include <avr/wdt.h>
+
+// 常量定义
+#define RELAY_PIN 5
+#define STATUS_LED_PIN 13
+#define KNOWN_FACE_ID 1
+#define SERIAL_BAUDRATE 115200
+#define RELAY_DELAY 5000
+#define DEBOUNCE_DELAY 500
+#define CONFIDENCE_THRESHOLD 80
+#define DEBUG_MODE 1
+
+// 调试宏定义
+#if DEBUG_MODE
+    #define DEBUG_PRINT(x) Serial.println(x)
+#else
+    #define DEBUG_PRINT(x)
+#endif
+
+HUSKYLENS huskylens;
+unsigned long lastTriggerTime = 0;
+bool relayState = false;
+
+void printResult(HUSKYLENSResult result);
+void blinkStatusLED(int times);
+void controlRelay(bool state);
+
+void setup() {
+    Serial.begin(SERIAL_BAUDRATE);
+    Wire.begin();
+    
+    // 初始化LED和继电器引脚
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, LOW);
+    
+    // 启用看门狗定时器
+    wdt_enable(WDTO_2S);
+    
+    // 初始化HuskyLens
+    while (!huskylens.begin(Wire)) {
+        DEBUG_PRINT(F("Begin failed!"));
+        DEBUG_PRINT(F("1.Please recheck the \"Protocol Type\" in HUSKYLENS (General Settings>>Protocol Type>>I2C)"));
+        DEBUG_PRINT(F("2.Please recheck the connection."));
+        blinkStatusLED(3);  // 错误指示
+        delay(100);
+        wdt_reset();  // 喂狗
+    }
+    
+    // 初始化成功指示
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(1000);
+    digitalWrite(STATUS_LED_PIN, LOW);
+}
+
+void loop() {
+    wdt_reset();  // 喂狗
+    
+    if (!huskylens.request()) {
+        DEBUG_PRINT(F("Fail to request data from HUSKYLENS, recheck the connection!"));
+        blinkStatusLED(2);
+    }
+    else if (!huskylens.isLearned()) {
+        DEBUG_PRINT(F("Nothing learned, press learn button on HUSKYLENS to learn one!"));
+        blinkStatusLED(4);
+    }
+    else if (!huskylens.available()) {
+        DEBUG_PRINT(F("No block or arrow appears on the screen!"));
+        controlRelay(false);
+    }
+    else {
+        DEBUG_PRINT(F("###########"));
+        while (huskylens.available()) {
+            HUSKYLENSResult result = huskylens.read();
+            printResult(result);
+            
+            unsigned long currentTime = millis();
+            
+            // 检查人脸ID和置信度
+            if (result.command == COMMAND_RETURN_BLOCK && 
+                result.ID == KNOWN_FACE_ID && 
+                result.ID_confidence > CONFIDENCE_THRESHOLD) {
+                
+                // 防抖动处理
+                if (currentTime - lastTriggerTime > DEBOUNCE_DELAY) {
+                    controlRelay(true);
+                    lastTriggerTime = currentTime;
+                    
+                    // 延时后关闭继电器
+                    delay(RELAY_DELAY);
+                    controlRelay(false);
+                }
+            }
+        }
+    }
+}
+
+void printResult(HUSKYLENSResult result) {
+    if (result.command == COMMAND_RETURN_BLOCK) {
+        DEBUG_PRINT(String() + F("Block:xCenter=") + result.xCenter + 
+                   F(",yCenter=") + result.yCenter + 
+                   F(",width=") + result.width + 
+                   F(",height=") + result.height + 
+                   F(",ID=") + result.ID + 
+                   F(",Confidence=") + result.ID_confidence);
+    }
+    else if (result.command == COMMAND_RETURN_ARROW) {
+        DEBUG_PRINT(String() + F("Arrow:xOrigin=") + result.xOrigin + 
+                   F(",yOrigin=") + result.yOrigin + 
+                   F(",xTarget=") + result.xTarget + 
+                   F(",yTarget=") + result.yTarget + 
+                   F(",ID=") + result.ID);
+    }
+    else {
+        DEBUG_PRINT("Object unknown!");
+    }
+}
+
+// LED状态指示函数
+void blinkStatusLED(int times) {
+    for(int i = 0; i < times; i++) {
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(STATUS_LED_PIN, LOW);
+        delay(200);
+    }
+}
+
+// 继电器控制函数
+void controlRelay(bool state) {
+    if (relayState != state) {
+        relayState = state;
+        digitalWrite(RELAY_PIN, state ? HIGH : LOW);
+        DEBUG_PRINT(String("Relay: ") + (state ? "ON" : "OFF"));
+    }
+}
