@@ -1,6 +1,6 @@
 #include "HUSKYLENS.h"
 #include "Wire.h"
-#include <avr/wdt.h>
+#include "esp_task_wdt.h"
 
 // 常量定义
 #define RELAY_PIN 5
@@ -9,7 +9,6 @@
 #define SERIAL_BAUDRATE 115200
 #define RELAY_DELAY 5000
 #define DEBOUNCE_DELAY 500
-#define CONFIDENCE_THRESHOLD 80
 #define DEBUG_MODE 1
 
 // 调试宏定义
@@ -36,8 +35,9 @@ void setup() {
     pinMode(RELAY_PIN, OUTPUT);
     digitalWrite(RELAY_PIN, LOW);
     
-    // 启用看门狗定时器
-    wdt_enable(WDTO_2S);
+    // 启用ESP32看门狗定时器
+    esp_task_wdt_init(2, true);
+    esp_task_wdt_add(NULL);
     
     // 初始化HuskyLens
     while (!huskylens.begin(Wire)) {
@@ -46,7 +46,7 @@ void setup() {
         DEBUG_PRINT(F("2.Please recheck the connection."));
         blinkStatusLED(3);  // 错误指示
         delay(100);
-        wdt_reset();  // 喂狗
+        esp_task_wdt_reset();
     }
     
     // 初始化成功指示
@@ -56,7 +56,7 @@ void setup() {
 }
 
 void loop() {
-    wdt_reset();  // 喂狗
+    esp_task_wdt_reset();
     
     if (!huskylens.request()) {
         DEBUG_PRINT(F("Fail to request data from HUSKYLENS, recheck the connection!"));
@@ -78,10 +78,9 @@ void loop() {
             
             unsigned long currentTime = millis();
             
-            // 检查人脸ID和置信度
+            // 检查人脸ID
             if (result.command == COMMAND_RETURN_BLOCK && 
-                result.ID == KNOWN_FACE_ID && 
-                result.ID_confidence > CONFIDENCE_THRESHOLD) {
+                result.ID == KNOWN_FACE_ID) {
                 
                 // 防抖动处理
                 if (currentTime - lastTriggerTime > DEBOUNCE_DELAY) {
@@ -103,8 +102,7 @@ void printResult(HUSKYLENSResult result) {
                    F(",yCenter=") + result.yCenter + 
                    F(",width=") + result.width + 
                    F(",height=") + result.height + 
-                   F(",ID=") + result.ID + 
-                   F(",Confidence=") + result.ID_confidence);
+                   F(",ID=") + result.ID);
     }
     else if (result.command == COMMAND_RETURN_ARROW) {
         DEBUG_PRINT(String() + F("Arrow:xOrigin=") + result.xOrigin + 
@@ -118,7 +116,6 @@ void printResult(HUSKYLENSResult result) {
     }
 }
 
-// LED状态指示函数
 void blinkStatusLED(int times) {
     for(int i = 0; i < times; i++) {
         digitalWrite(STATUS_LED_PIN, HIGH);
@@ -128,7 +125,6 @@ void blinkStatusLED(int times) {
     }
 }
 
-// 继电器控制函数
 void controlRelay(bool state) {
     if (relayState != state) {
         relayState = state;
