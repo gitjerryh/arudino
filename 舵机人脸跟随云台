@@ -1,0 +1,226 @@
+#include <HUSKYLENS.h>
+#include <Wire.h>
+#include <ESP32Servo.h>
+
+HUSKYLENS huskylens;
+Servo panServo;
+Servo tiltServo;
+
+const int PAN_SERVO_PIN = 12;
+const int TILT_SERVO_PIN = 13;
+
+// Servo parameters
+const int PAN_CENTER = 90;
+const int TILT_CENTER = 90;
+const int SERVO_MIN = 0;
+const int SERVO_MAX = 180;
+
+// Enhanced PID parameters for smoother movement
+struct PIDController {
+    float Kp = 0.15;    // Reduced from 0.25
+    float Ki = 0.005;   // Reduced from 0.01
+    float Kd = 0.08;    // Reduced from 0.15
+    float integral = 0;
+    float previousError = 0;
+    float integralLimit = 50.0;  // Reduced from 100.0
+};
+
+PIDController panPID;
+PIDController tiltPID;
+
+// Frame parameters
+const int FRAME_WIDTH = 320;
+const int FRAME_HEIGHT = 240;
+const int FRAME_CENTER_X = FRAME_WIDTH / 2;
+const int FRAME_CENTER_Y = FRAME_HEIGHT / 2;
+
+// Current positions
+int currentPanPosition = PAN_CENTER;
+int currentTiltPosition = TILT_CENTER;
+
+// Enhanced tracking parameters
+const int DEADBAND = 8;  // Increased from 5
+const int POSITION_HISTORY_SIZE = 5;
+struct PositionHistory {
+    int x[POSITION_HISTORY_SIZE];
+    int y[POSITION_HISTORY_SIZE];
+    int index = 0;
+};
+PositionHistory posHistory;
+
+// Movement constraints
+const float MAX_SPEED = 3.0;  // Maximum degrees per update
+float lastPanSpeed = 0;
+float lastTiltSpeed = 0;
+const float MAX_ACCELERATION = 0.5;  // Maximum speed change per update
+
+bool isTracking = false;
+unsigned long lastTrackTime = 0;
+const int PREDICT_THRESHOLD = 100;  // ms
+void centerGimbal();
+void setup() {
+    Serial.begin(115200);
+    Wire.begin();
+    
+    while (!huskylens.begin(Wire)) {
+        Serial.println(F("HUSKYLENS not connected!"));
+        delay(100);
+    }
+    
+    huskylens.writeAlgorithm(ALGORITHM_OBJECT_TRACKING);
+    
+    ESP32PWM::allocateTimer(0);
+    ESP32PWM::allocateTimer(1);
+    panServo.setPeriodHertz(50);
+    tiltServo.setPeriodHertz(50);
+    
+    panServo.attach(PAN_SERVO_PIN, 500, 2500);
+    tiltServo.attach(TILT_SERVO_PIN, 500, 2500);
+    
+    // Initialize position history
+    for (int i = 0; i < POSITION_HISTORY_SIZE; i++) {
+        posHistory.x[i] = FRAME_CENTER_X;
+        posHistory.y[i] = FRAME_CENTER_Y;
+    }
+    
+    centerGimbal();
+}
+
+void centerGimbal() {
+    panServo.write(PAN_CENTER);
+    tiltServo.write(TILT_CENTER);
+    currentPanPosition = PAN_CENTER;
+    currentTiltPosition = TILT_CENTER;
+    delay(1000);
+}
+
+float calculatePID(PIDController &pid, float error, float dt) {
+    // Enhanced deadband logic
+    if (abs(error) < DEADBAND) {
+        pid.integral *= 0.95;  // Gradual integral decay
+        return 0;
+    }
+    
+    // Dynamic integral adjustment
+    if (abs(error) < DEADBAND * 2) {
+        pid.integral = constrain(pid.integral + error * dt, -pid.integralLimit, pid.integralLimit);
+    } else {
+        pid.integral *= 0.95;  // Reduce integral when error is large
+    }
+    
+    // Smoothed derivative calculation
+    float derivative = (error - pid.previousError) / dt;
+    derivative = 0.8 * derivative + 0.2 * pid.previousError;
+    
+    float output = (pid.Kp * error) + (pid.Ki * pid.integral) + (pid.Kd * derivative);
+    pid.previousError = error;
+    
+    return output;
+}
+
+void updatePositionHistory(int x, int y) {
+    posHistory.index = (posHistory.index + 1) % POSITION_HISTORY_SIZE;
+    posHistory.x[posHistory.index] = x;
+    posHistory.y[posHistory.index] = y;
+}
+
+void getSmoothedPosition(int &smoothX, int &smoothY) {
+    smoothX = 0;
+    smoothY = 0;
+    float weight = 0;
+    float totalWeight = 0;
+    
+    for (int i = 0; i < POSITION_HISTORY_SIZE; i++) {
+        weight = (float)(POSITION_HISTORY_SIZE - i) / POSITION_HISTORY_SIZE;
+        smoothX += posHistory.x[i] * weight;
+        smoothY += posHistory.y[i] * weight;
+        totalWeight += weight;
+    }
+    
+    smoothX = round(smoothX / totalWeight);
+    smoothY = round(smoothY / totalWeight);
+}
+
+void moveGimbal(int targetX, int targetY) {
+    float dt = 0.02;
+    
+    // Get smoothed position
+    int smoothX, smoothY;
+    getSmoothedPosition(smoothX, smoothY);
+    
+    float panError = smoothX - FRAME_CENTER_X;
+    float tiltError = smoothY - FRAME_CENTER_Y;
+    
+    float panAdjustment = calculatePID(panPID, panError, dt);
+    float tiltAdjustment = calculatePID(tiltPID, tiltError, dt);
+    
+    // Calculate desired speeds
+    float desiredPanSpeed = -panAdjustment * 0.1;
+    float desiredTiltSpeed = tiltAdjustment * 0.1;
+    
+    // Limit acceleration
+    desiredPanSpeed = constrain(desiredPanSpeed, 
+                              lastPanSpeed - MAX_ACCELERATION, 
+                              lastPanSpeed + MAX_ACCELERATION);
+    desiredTiltSpeed = constrain(desiredTiltSpeed, 
+                               lastTiltSpeed - MAX_ACCELERATION, 
+                               lastTiltSpeed + MAX_ACCELERATION);
+    
+    // Limit speed
+    desiredPanSpeed = constrain(desiredPanSpeed, -MAX_SPEED, MAX_SPEED);
+    desiredTiltSpeed = constrain(desiredTiltSpeed, -MAX_SPEED, MAX_SPEED);
+    
+    // Update positions
+    float smoothingFactor = 0.2;
+    currentPanPosition = currentPanPosition * (1 - smoothingFactor) + 
+                        constrain(currentPanPosition + desiredPanSpeed, SERVO_MIN, SERVO_MAX) * smoothingFactor;
+    currentTiltPosition = currentTiltPosition * (1 - smoothingFactor) + 
+                         constrain(currentTiltPosition + desiredTiltSpeed, SERVO_MIN, SERVO_MAX) * smoothingFactor;
+    
+    // Update last speeds
+    lastPanSpeed = desiredPanSpeed;
+    lastTiltSpeed = desiredTiltSpeed;
+    
+    // Move servos
+    panServo.write(round(currentPanPosition));
+    tiltServo.write(round(currentTiltPosition));
+}
+
+void loop() {
+    if (!huskylens.request()) {
+        Serial.println("Failed to request data from HUSKYLENS");
+        delay(100);
+        return;
+    }
+    
+    if (huskylens.countBlocks()) {
+        HUSKYLENSResult result = huskylens.getBlock(0);
+        isTracking = true;
+        lastTrackTime = millis();
+        
+        updatePositionHistory(result.xCenter, result.yCenter);
+        moveGimbal(result.xCenter, result.yCenter);
+        
+        Serial.printf("Tracking object - X: %d, Y: %d\n", result.xCenter, result.yCenter);
+    } else if (isTracking && (millis() - lastTrackTime < PREDICT_THRESHOLD)) {
+        // Continue movement with prediction for a short time
+        int predictX, predictY;
+        getSmoothedPosition(predictX, predictY);
+        moveGimbal(predictX, predictY);
+    } else if (isTracking) {
+        isTracking = false;
+        centerGimbal();
+        
+        // Reset PID controllers
+        panPID.integral = 0;
+        tiltPID.integral = 0;
+        panPID.previousError = 0;
+        tiltPID.previousError = 0;
+        
+        // Reset speed tracking
+        lastPanSpeed = 0;
+        lastTiltSpeed = 0;
+    }
+    
+    delay(20);
+}
