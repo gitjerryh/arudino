@@ -9,53 +9,76 @@ Servo tiltServo;
 const int PAN_SERVO_PIN = 12;
 const int TILT_SERVO_PIN = 13;
 
-// Servo parameters
-const int SERVO_MIN = 0;
-const int SERVO_MAX = 180;
-
-// Enhanced PID parameters for smoother movement
+// 优化后的PID参数
 struct PIDController {
-    float Kp = 0.15;
-    float Ki = 0.005;
-    float Kd = 0.08;
+    float Kp = 0.18;  // 提高比例系数
+    float Ki = 0.006; // 轻微提高积分系数
+    float Kd = 0.09;  // 提高微分系数以减少振荡
     float integral = 0;
     float previousError = 0;
-    float integralLimit = 50.0;
+    float integralLimit = 60.0; // 增加积分限制
 };
 
 PIDController panPID;
 PIDController tiltPID;
 
-// Frame parameters
+// 框架参数
 const int FRAME_WIDTH = 320;
 const int FRAME_HEIGHT = 240;
 const int FRAME_CENTER_X = FRAME_WIDTH / 2;
 const int FRAME_CENTER_Y = FRAME_HEIGHT / 2;
 
-// Current positions
-int currentPanPosition = 90;  // Start from center
-int currentTiltPosition = 90; // Start from center
+// 当前位置
+float currentPanPosition = 90;
+float currentTiltPosition = 90;
 
-// Enhanced tracking parameters
-const int DEADBAND = 12;
-const int POSITION_HISTORY_SIZE = 5;
+// 追踪参数优化
+const int DEADBAND = 8;  // 减小死区以提高精度
+const int POSITION_HISTORY_SIZE = 8;  // 增加历史位置样本
 struct PositionHistory {
     int x[POSITION_HISTORY_SIZE];
     int y[POSITION_HISTORY_SIZE];
+    unsigned long timestamp[POSITION_HISTORY_SIZE];
     int index = 0;
 };
 PositionHistory posHistory;
 
-// Movement constraints
-const float MAX_SPEED = 3.0;
+// 运动约束
+const float MAX_SPEED = 4.0;        // 增加最大速度
+const float MAX_ACCELERATION = 0.6;  // 增加最大加速度
 float lastPanSpeed = 0;
 float lastTiltSpeed = 0;
-const float MAX_ACCELERATION = 0.5;
 
+// 追踪状态管理
+enum TrackingState {
+    IDLE,
+    TRACKING,
+    PREDICTING,
+    RETURNING
+};
+TrackingState currentState = IDLE;
+
+// 追踪控制参数
 bool isTracking = false;
 unsigned long lastTrackTime = 0;
-const int PREDICT_THRESHOLD = 100;  // ms
+const int PREDICT_THRESHOLD = 80;  // 减少预测阈值以提高响应速度
+const int RETURN_TIMEOUT = 1500;   // 返回超时时间
+
+// 速度预测
+struct VelocityEstimator {
+    float vx = 0;
+    float vy = 0;
+    void update(float dx, float dt) {
+        const float alpha = 0.7;
+        float new_vx = dx / dt;
+        vx = alpha * new_vx + (1 - alpha) * vx;
+    }
+};
+VelocityEstimator velocityEstimator;
+void initializePositionHistory();
 void centerGimbal();
+void resetControllers();
+void moveGimbal(float targetX, float targetY);
 
 void setup() {
     Serial.begin(115200);
@@ -76,40 +99,46 @@ void setup() {
     panServo.attach(PAN_SERVO_PIN, 500, 2500);
     tiltServo.attach(TILT_SERVO_PIN, 500, 2500);
     
-    for (int i = 0; i < POSITION_HISTORY_SIZE; i++) {
-        posHistory.x[i] = FRAME_CENTER_X;
-        posHistory.y[i] = FRAME_CENTER_Y;
-    }
-    
+    initializePositionHistory();
     centerGimbal();
 }
 
-void centerGimbal() {
-    panServo.write(90);
-    tiltServo.write(90);
-    currentPanPosition = 90;
-    currentTiltPosition = 90;
-    delay(1000);
+void initializePositionHistory() {
+    unsigned long currentTime = millis();
+    for (int i = 0; i < POSITION_HISTORY_SIZE; i++) {
+        posHistory.x[i] = FRAME_CENTER_X;
+        posHistory.y[i] = FRAME_CENTER_Y;
+        posHistory.timestamp[i] = currentTime;
+    }
 }
 
 float calculatePID(PIDController &pid, float error, float dt) {
+    // 动态调整PID参数
     if (abs(error) < DEADBAND) {
-        pid.integral *= 0.95;
+        pid.integral *= 0.93;
         return 0;
     }
     
-    if (abs(error) < DEADBAND * 2) {
+    // 非线性PID控制
+    float error_sign = error > 0 ? 1.0 : -1.0;
+    float error_mag = abs(error);
+    
+    // 动态积分控制
+    if (error_mag < DEADBAND * 3) {
         pid.integral = constrain(pid.integral + error * dt, -pid.integralLimit, pid.integralLimit);
     } else {
         pid.integral *= 0.95;
     }
     
+    // 计算微分项并应用滤波
     float derivative = (error - pid.previousError) / dt;
-    derivative = 0.8 * derivative + 0.2 * pid.previousError;
+    derivative = 0.85 * derivative + 0.15 * pid.previousError;
     
+    // 非线性输出映射
     float output = (pid.Kp * error) + (pid.Ki * pid.integral) + (pid.Kd * derivative);
-    pid.previousError = error;
+    output = pow(abs(output), 0.8) * (output > 0 ? 1 : -1);
     
+    pid.previousError = error;
     return output;
 }
 
@@ -117,40 +146,43 @@ void updatePositionHistory(int x, int y) {
     posHistory.index = (posHistory.index + 1) % POSITION_HISTORY_SIZE;
     posHistory.x[posHistory.index] = x;
     posHistory.y[posHistory.index] = y;
+    posHistory.timestamp[posHistory.index] = millis();
 }
 
-void getSmoothedPosition(int &smoothX, int &smoothY) {
-    smoothX = 0;
-    smoothY = 0;
-    float weight = 0;
-    float totalWeight = 0;
+void predictNextPosition(float &predX, float &predY) {
+    int latest_idx = posHistory.index;
+    int oldest_idx = (latest_idx + 1) % POSITION_HISTORY_SIZE;
     
-    for (int i = 0; i < POSITION_HISTORY_SIZE; i++) {
-        weight = (float)(POSITION_HISTORY_SIZE - i) / POSITION_HISTORY_SIZE;
-        smoothX += posHistory.x[i] * weight;
-        smoothY += posHistory.y[i] * weight;
-        totalWeight += weight;
+    float dt = (posHistory.timestamp[latest_idx] - posHistory.timestamp[oldest_idx]) / 1000.0;
+    if (dt > 0) {
+        float dx = posHistory.x[latest_idx] - posHistory.x[oldest_idx];
+        float dy = posHistory.y[latest_idx] - posHistory.y[oldest_idx];
+        
+        velocityEstimator.update(dx, dt);
+        
+        predX = posHistory.x[latest_idx] + velocityEstimator.vx * 0.1;
+        predY = posHistory.y[latest_idx] + velocityEstimator.vy * 0.1;
+    } else {
+        predX = posHistory.x[latest_idx];
+        predY = posHistory.y[latest_idx];
     }
-    
-    smoothX = round(smoothX / totalWeight);
-    smoothY = round(smoothY / totalWeight);
 }
 
-void moveGimbal(int targetX, int targetY) {
+void moveGimbal(float targetX, float targetY) {
     float dt = 0.02;
     
-    int smoothX, smoothY;
-    getSmoothedPosition(smoothX, smoothY);
+    float panError = targetX - FRAME_CENTER_X;
+    float tiltError = targetY - FRAME_CENTER_Y;
     
-    float panError = smoothX - FRAME_CENTER_X;
-    float tiltError = smoothY - FRAME_CENTER_Y;
-    
+    // 计算PID输出
     float panAdjustment = calculatePID(panPID, panError, dt);
     float tiltAdjustment = calculatePID(tiltPID, tiltError, dt);
     
-    float desiredPanSpeed = -panAdjustment * 0.1;
-    float desiredTiltSpeed = tiltAdjustment * 0.1;
+    // 速度控制
+    float desiredPanSpeed = -panAdjustment * 0.12;
+    float desiredTiltSpeed = tiltAdjustment * 0.12;
     
+    // 加速度限制
     desiredPanSpeed = constrain(desiredPanSpeed, 
                               lastPanSpeed - MAX_ACCELERATION, 
                               lastPanSpeed + MAX_ACCELERATION);
@@ -158,18 +190,21 @@ void moveGimbal(int targetX, int targetY) {
                                lastTiltSpeed - MAX_ACCELERATION, 
                                lastTiltSpeed + MAX_ACCELERATION);
     
+    // 速度限制
     desiredPanSpeed = constrain(desiredPanSpeed, -MAX_SPEED, MAX_SPEED);
     desiredTiltSpeed = constrain(desiredTiltSpeed, -MAX_SPEED, MAX_SPEED);
     
-    float smoothingFactor = 0.4;  // 增加到 0.4，减少晃动
+    // 平滑移动
+    float smoothingFactor = 0.45;
     currentPanPosition = currentPanPosition * (1 - smoothingFactor) + 
-                        constrain(currentPanPosition + desiredPanSpeed, SERVO_MIN, SERVO_MAX) * smoothingFactor;
+                        constrain(currentPanPosition + desiredPanSpeed, 0, 180) * smoothingFactor;
     currentTiltPosition = currentTiltPosition * (1 - smoothingFactor) + 
-                         constrain(currentTiltPosition + desiredTiltSpeed, SERVO_MIN, SERVO_MAX) * smoothingFactor;
+                         constrain(currentTiltPosition + desiredTiltSpeed, 0, 180) * smoothingFactor;
     
     lastPanSpeed = desiredPanSpeed;
     lastTiltSpeed = desiredTiltSpeed;
     
+    // 更新舵机位置
     panServo.write(round(currentPanPosition));
     tiltServo.write(round(currentTiltPosition));
 }
@@ -177,35 +212,60 @@ void moveGimbal(int targetX, int targetY) {
 void loop() {
     if (!huskylens.request()) {
         Serial.println("Failed to request data from HUSKYLENS");
-        delay(100);
+        delay(50);
         return;
     }
     
     if (huskylens.countBlocks()) {
         HUSKYLENSResult result = huskylens.getBlock(0);
-        isTracking = true;
+        currentState = TRACKING;
         lastTrackTime = millis();
         
         updatePositionHistory(result.xCenter, result.yCenter);
         moveGimbal(result.xCenter, result.yCenter);
         
-        Serial.printf("Tracking object - X: %d, Y: %d\n", result.xCenter, result.yCenter);
-    } else if (isTracking && (millis() - lastTrackTime < PREDICT_THRESHOLD)) {
-        int predictX, predictY;
-        getSmoothedPosition(predictX, predictY);
-        moveGimbal(predictX, predictY);
-    } else if (isTracking) {
-        isTracking = false;
-        centerGimbal();
+        Serial.printf("Tracking - X: %d, Y: %d, Pan: %.1f, Tilt: %.1f\n", 
+                     result.xCenter, result.yCenter, currentPanPosition, currentTiltPosition);
+    } else {
+        unsigned long currentTime = millis();
+        unsigned long timeSinceLastTrack = currentTime - lastTrackTime;
         
-        panPID.integral = 0;
-        tiltPID.integral = 0;
-        panPID.previousError = 0;
-        tiltPID.previousError = 0;
-        
-        lastPanSpeed = 0;
-        lastTiltSpeed = 0;
+        if (currentState == TRACKING && timeSinceLastTrack < PREDICT_THRESHOLD) {
+            currentState = PREDICTING;
+            float predX, predY;
+            predictNextPosition(predX, predY);
+            moveGimbal(predX, predY);
+        } else if (timeSinceLastTrack > RETURN_TIMEOUT) {
+            if (currentState != IDLE) {
+                currentState = RETURNING;
+                centerGimbal();
+                resetControllers();
+            }
+        }
     }
     
     delay(20);
+}
+
+void resetControllers() {
+    panPID.integral = 0;
+    tiltPID.integral = 0;
+    panPID.previousError = 0;
+    tiltPID.previousError = 0;
+    lastPanSpeed = 0;
+    lastTiltSpeed = 0;
+    velocityEstimator.vx = 0;
+    velocityEstimator.vy = 0;
+}
+
+void centerGimbal() {
+    currentState = IDLE;
+    float smoothingFactor = 0.1;
+    while (abs(currentPanPosition - 90) > 0.5 || abs(currentTiltPosition - 90) > 0.5) {
+        currentPanPosition = currentPanPosition * (1 - smoothingFactor) + 90 * smoothingFactor;
+        currentTiltPosition = currentTiltPosition * (1 - smoothingFactor) + 90 * smoothingFactor;
+        panServo.write(round(currentPanPosition));
+        tiltServo.write(round(currentTiltPosition));
+        delay(20);
+    }
 }
