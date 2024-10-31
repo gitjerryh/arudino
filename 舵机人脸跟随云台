@@ -9,32 +9,29 @@ Servo tiltServo;
 const int PAN_SERVO_PIN = 12;
 const int TILT_SERVO_PIN = 13;
 
-// 优化后的PID参数
+// PID参数微调
 struct PIDController {
-    float Kp = 0.18;  // 提高比例系数
-    float Ki = 0.006; // 轻微提高积分系数
-    float Kd = 0.09;  // 提高微分系数以减少振荡
+    float Kp = 0.15;    // 降低比例系数减少抖动
+    float Ki = 0.004;   // 降低积分系数
+    float Kd = 0.08;    // 保持较小的微分系数
     float integral = 0;
     float previousError = 0;
-    float integralLimit = 60.0; // 增加积分限制
+    float integralLimit = 50.0;
 };
 
 PIDController panPID;
 PIDController tiltPID;
 
-// 框架参数
 const int FRAME_WIDTH = 320;
 const int FRAME_HEIGHT = 240;
 const int FRAME_CENTER_X = FRAME_WIDTH / 2;
 const int FRAME_CENTER_Y = FRAME_HEIGHT / 2;
 
-// 当前位置
 float currentPanPosition = 90;
 float currentTiltPosition = 90;
 
-// 追踪参数优化
-const int DEADBAND = 8;  // 减小死区以提高精度
-const int POSITION_HISTORY_SIZE = 8;  // 增加历史位置样本
+const int DEADBAND = 10;
+const int POSITION_HISTORY_SIZE = 6;  // 减少历史记录数量
 struct PositionHistory {
     int x[POSITION_HISTORY_SIZE];
     int y[POSITION_HISTORY_SIZE];
@@ -43,13 +40,11 @@ struct PositionHistory {
 };
 PositionHistory posHistory;
 
-// 运动约束
-const float MAX_SPEED = 4.0;        // 增加最大速度
-const float MAX_ACCELERATION = 0.6;  // 增加最大加速度
+const float MAX_SPEED = 3.0;         // 降低最大速度
+const float MAX_ACCELERATION = 0.4;   // 降低最大加速度
 float lastPanSpeed = 0;
 float lastTiltSpeed = 0;
 
-// 追踪状态管理
 enum TrackingState {
     IDLE,
     TRACKING,
@@ -58,23 +53,50 @@ enum TrackingState {
 };
 TrackingState currentState = IDLE;
 
-// 追踪控制参数
-bool isTracking = false;
 unsigned long lastTrackTime = 0;
-const int PREDICT_THRESHOLD = 80;  // 减少预测阈值以提高响应速度
-const int RETURN_TIMEOUT = 1500;   // 返回超时时间
+unsigned long lastRequestTime = 0;    // 添加请求时间控制
+const int MIN_REQUEST_INTERVAL = 35;  // 最小请求间隔(ms)
+const int PREDICT_THRESHOLD = 100;
+const int RETURN_TIMEOUT = 1500;
 
-// 速度预测
+// 添加连接状态监控
+unsigned long lastSuccessfulRequest = 0;
+const int CONNECTION_TIMEOUT = 2000;
+bool isConnected = false;
+
 struct VelocityEstimator {
     float vx = 0;
     float vy = 0;
     void update(float dx, float dt) {
-        const float alpha = 0.7;
+        const float alpha = 0.6;
         float new_vx = dx / dt;
         vx = alpha * new_vx + (1 - alpha) * vx;
     }
 };
 VelocityEstimator velocityEstimator;
+
+// 添加通信重试机制
+bool ensureConnection() {
+    static uint8_t retryCount = 0;
+    if (!isConnected || (millis() - lastSuccessfulRequest > CONNECTION_TIMEOUT)) {
+        if (retryCount < 3) {
+            Wire.begin();
+            if (huskylens.begin(Wire)) {
+                huskylens.writeAlgorithm(ALGORITHM_OBJECT_TRACKING); // 重新设置算法
+                isConnected = true;
+                retryCount = 0;
+                return true;
+            }
+            retryCount++;
+            delay(100);
+        } else {
+            retryCount = 0;
+            return false;
+        }
+    }
+    return isConnected;
+}
+
 void initializePositionHistory();
 void centerGimbal();
 void resetControllers();
@@ -83,10 +105,11 @@ void moveGimbal(float targetX, float targetY);
 void setup() {
     Serial.begin(115200);
     Wire.begin();
+    Wire.setClock(100000); // 降低I2C速度到100kHz
     
     while (!huskylens.begin(Wire)) {
-        Serial.println(F("HUSKYLENS not connected!"));
-        delay(100);
+        Serial.println(F("Connecting to HUSKYLENS..."));
+        delay(200);
     }
     
     huskylens.writeAlgorithm(ALGORITHM_OBJECT_TRACKING);
@@ -101,6 +124,9 @@ void setup() {
     
     initializePositionHistory();
     centerGimbal();
+    
+    isConnected = true;
+    lastSuccessfulRequest = millis();
 }
 
 void initializePositionHistory() {
@@ -210,16 +236,43 @@ void moveGimbal(float targetX, float targetY) {
 }
 
 void loop() {
-    if (!huskylens.request()) {
-        Serial.println("Failed to request data from HUSKYLENS");
-        delay(50);
+    unsigned long currentTime = millis();
+    
+    // 控制请求频率
+    if (currentTime - lastRequestTime < MIN_REQUEST_INTERVAL) {
+        delay(5);
         return;
     }
     
+    // 检查连接状态
+    if (!ensureConnection()) {
+        Serial.println("Connection lost, attempting to reconnect...");
+        delay(100);
+        return;
+    }
+    
+    lastRequestTime = currentTime;
+    
+    if (!huskylens.request()) {
+        Serial.println("Failed to request data from HUSKYLENS");
+        delay(MIN_REQUEST_INTERVAL);
+        return;
+    }
+    
+    lastSuccessfulRequest = currentTime;
+    
     if (huskylens.countBlocks()) {
         HUSKYLENSResult result = huskylens.getBlock(0);
+        
+        // 验证数据有效性
+        if (result.xCenter < 0 || result.xCenter > FRAME_WIDTH ||
+            result.yCenter < 0 || result.yCenter > FRAME_HEIGHT) {
+            Serial.println("Invalid coordinates received");
+            return;
+        }
+        
         currentState = TRACKING;
-        lastTrackTime = millis();
+        lastTrackTime = currentTime;
         
         updatePositionHistory(result.xCenter, result.yCenter);
         moveGimbal(result.xCenter, result.yCenter);
@@ -227,7 +280,6 @@ void loop() {
         Serial.printf("Tracking - X: %d, Y: %d, Pan: %.1f, Tilt: %.1f\n", 
                      result.xCenter, result.yCenter, currentPanPosition, currentTiltPosition);
     } else {
-        unsigned long currentTime = millis();
         unsigned long timeSinceLastTrack = currentTime - lastTrackTime;
         
         if (currentState == TRACKING && timeSinceLastTrack < PREDICT_THRESHOLD) {
@@ -244,7 +296,7 @@ void loop() {
         }
     }
     
-    delay(20);
+    delay(MIN_REQUEST_INTERVAL);
 }
 
 void resetControllers() {
