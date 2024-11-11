@@ -1,114 +1,117 @@
 #include <Wire.h>
 #include "GravityRtc.h"
 #include "DFRobot_RGBLCD1602.h"
+#include "DFRobot_EnvironmentalSensor.h"
 
 GravityRtc rtc;
 DFRobot_RGBLCD1602 lcd(0x2D, 16, 2);
+DFRobot_EnvironmentalSensor environment(SEN050X_DEFAULT_DEVICE_ADDRESS, &Wire);
 
 const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-const char* ampm[] = {"AM", "PM"};
 
 unsigned long lastUpdate = 0;
 unsigned long lastColorChange = 0;
+unsigned long lastEnvUpdate = 0;
 unsigned long colorDuration = 0;
 unsigned long specialEffectStart = 0;
+const unsigned long ENV_UPDATE_INTERVAL = 1000;
+bool showTimeMode = true;
+
 int currentColor = 0;
 float breatheValue = 0;
 bool breatheIncreasing = true;
 bool inSpecialEffect = false;
 int specialEffectStep = 0;
 
-// 自定义字符：时钟装饰
+// Custom characters
 byte clockChar[8] = {
-  B00000,
-  B01110,
-  B10101,
-  B10111,
-  B10001,
-  B01110,
-  B00000,
-  B00000
+  B00000, B01110, B10101, B10111,
+  B10001, B01110, B00000, B00000
 };
 
-// 自定义字符：温度计
 byte thermometer[8] = {
-  B00100,
-  B01010,
-  B01010,
-  B01110,
-  B01110,
-  B11111,
-  B11111,
-  B01110
+  B00100, B01010, B01010, B01110,
+  B01110, B11111, B11111, B01110
 };
 
-// 显示模式
-enum DisplayMode {
-  MODE_NORMAL,
-  MODE_LARGE_TIME,
-  MODE_DATE_FOCUS,
-  MODE_MINIMAL
+byte humidityChar[8] = {
+  B00100, B00100, B01110, B01110,
+  B11111, B11111, B01110, B00000
 };
 
-DisplayMode currentMode = MODE_NORMAL;
-unsigned long modeChangeTime = 0;
-const unsigned long MODE_DURATION = 5000; // 每种显示模式持续5秒
+byte lightChar[8] = {
+  B00000, B10101, B01110, B11111,
+  B01110, B10101, B00000, B00000
+};
 
-// 不同时段的颜色主题
+// Color themes
 const int MORNING_COLORS[][3] = {
-  {255, 200, 100},  // 暖黄
-  {255, 150, 50},   // 橙色
-  {255, 180, 120},  // 晨光色
-  {200, 150, 100}   // 淡褐色
+  {255, 200, 100}, {255, 150, 50},
+  {255, 180, 120}, {200, 150, 100}
 };
 
 const int DAY_COLORS[][3] = {
-  {100, 200, 255},  // 天蓝
-  {150, 255, 200},  // 淡绿
-  {255, 255, 200},  // 明黄
-  {200, 255, 255}   // 淡青
+  {100, 200, 255}, {150, 255, 200},
+  {255, 255, 200}, {200, 255, 255}
 };
 
 const int EVENING_COLORS[][3] = {
-  {255, 100, 100},  // 粉红
-  {255, 150, 50},   // 橙红
-  {200, 100, 150},  // 紫红
-  {150, 100, 200}   // 淡紫
+  {255, 100, 100}, {255, 150, 50},
+  {200, 100, 150}, {150, 100, 200}
 };
 
 const int NIGHT_COLORS[][3] = {
-  {50, 50, 150},    // 深蓝
-  {100, 50, 150},   // 靛蓝
-  {50, 100, 150},   // 蓝绿
-  {100, 100, 200}   // 淡蓝紫
+  {50, 50, 150}, {100, 50, 150},
+  {50, 100, 150}, {100, 100, 200}
 };
 
 const int SPECIAL_COLORS[][3] = {
-  {255, 255, 255},  // 白色
-  {255, 255, 0},    // 黄色
-  {255, 0, 0},      // 红色
-  {0, 255, 0},      // 绿色
-  {0, 0, 255}       // 蓝色
+  {255, 255, 255}, {255, 255, 0},
+  {255, 0, 0}, {0, 255, 0}, {0, 0, 255}
 };
 
 int currentThemeColors[4][3];
 int numThemeColors = 4;
 
+
+// 添加亮度控制相关的常量
+const int MIN_LIGHT = 0;    // 最小光照强度（lux）
+const int MAX_LIGHT = 1000; // 最大光照强度（lux）
+const float MIN_BRIGHTNESS = 0.2; // 最小亮度比例
+const float MAX_BRIGHTNESS = 1.0; // 最大亮度比例
+float currentBrightness = MAX_BRIGHTNESS;
+
 void setColor(int r, int g, int b, float intensity) {
+  intensity *= currentBrightness; // 应用全局亮度设置
   lcd.setPWM(lcd.REG_RED, r * intensity);
   lcd.setPWM(lcd.REG_GREEN, g * intensity);
   lcd.setPWM(lcd.REG_BLUE, b * intensity);
 }
 
+void adjustBrightness() {
+  int lightIntensity = environment.getLuminousIntensity();
+  
+  // 将光照强度限制在有效范围内
+  lightIntensity = constrain(lightIntensity, MIN_LIGHT, MAX_LIGHT);
+  
+  // 使用映射函数计算亮度
+  currentBrightness = MIN_BRIGHTNESS + 
+    (MAX_BRIGHTNESS - MIN_BRIGHTNESS) * 
+    (float)(lightIntensity - MIN_LIGHT) / (MAX_LIGHT - MIN_LIGHT);
+    
+  // 使用指数曲线使亮度变化更自然
+  currentBrightness = pow(currentBrightness, 0.5);
+}
+
 void updateThemeColors(int hour) {
-  if (hour >= 6 && hour < 11) {  // 早晨
+  if (hour >= 6 && hour < 11) {
     memcpy(currentThemeColors, MORNING_COLORS, sizeof(MORNING_COLORS));
-  } else if (hour >= 11 && hour < 17) {  // 白天
+  } else if (hour >= 11 && hour < 17) {
     memcpy(currentThemeColors, DAY_COLORS, sizeof(DAY_COLORS));
-  } else if (hour >= 17 && hour < 20) {  // 傍晚
+  } else if (hour >= 17 && hour < 20) {
     memcpy(currentThemeColors, EVENING_COLORS, sizeof(EVENING_COLORS));
-  } else {  // 夜晚
+  } else {
     memcpy(currentThemeColors, NIGHT_COLORS, sizeof(NIGHT_COLORS));
   }
 }
@@ -116,7 +119,7 @@ void updateThemeColors(int hour) {
 void handleSpecialEffect(unsigned long currentMillis) {
   if (!inSpecialEffect) return;
   
-  const int effectDuration = 3000;  // 特效持续3秒
+  const int effectDuration = 3000;
   unsigned long elapsedTime = currentMillis - specialEffectStart;
   
   if (elapsedTime > effectDuration) {
@@ -124,8 +127,7 @@ void handleSpecialEffect(unsigned long currentMillis) {
     return;
   }
 
-  // 快速颜色切换特效
-  int step = (elapsedTime / 200) % 5;  // 每200ms切换一次颜色
+  int step = (elapsedTime / 200) % 5;
   setColor(
     SPECIAL_COLORS[step][0],
     SPECIAL_COLORS[step][1],
@@ -134,64 +136,27 @@ void handleSpecialEffect(unsigned long currentMillis) {
   );
 }
 
-void displayNormalMode() {
+void displayTime() {
   lcd.clear();
-  lcd.write(byte(0)); // 显示时钟图标
-  
-  // 第一行：时间
+  lcd.write(byte(0));
   lcd.setCursor(2, 0);
-  int hour12 = rtc.hour % 12;
-  if (hour12 == 0) hour12 = 12;
-  lcd.printf("%2d:%02d %s", hour12, rtc.minute, ampm[rtc.hour/12]);
-  
-  // 第二行：日期
+  lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
   lcd.setCursor(0, 1);
   lcd.printf("%s %02d %s", monthNames[rtc.month-1], rtc.day, dayNames[rtc.week]);
+  lcd.setCursor(15, 1);
+  lcd.write(byte(1));
 }
 
-void displayLargeTimeMode() {
+void displayEnvironmental() {
   lcd.clear();
-  // 居中显示大时间
-  int hour12 = rtc.hour % 12;
-  if (hour12 == 0) hour12 = 12;
+  lcd.write(byte(1));
+  lcd.printf(" %.1fC ", environment.getTemperature(TEMP_C));
+  lcd.write(byte(2));
+  lcd.printf(" %d%%", (int)environment.getHumidity());
   
-  char timeStr[16];
-  sprintf(timeStr, "%2d:%02d", hour12, rtc.minute);
-  int pos = (16 - strlen(timeStr)) / 2;
-  
-  lcd.setCursor(pos, 0);
-  lcd.print(timeStr);
-  
-  // 第二行显示秒数和AM/PM
-  sprintf(timeStr, "%02d %s", rtc.second, ampm[rtc.hour/12]);
-  pos = (16 - strlen(timeStr)) / 2;
-  lcd.setCursor(pos, 1);
-  lcd.print(timeStr);
-}
-
-void displayDateFocusMode() {
-  lcd.clear();
-  char dateStr[16];
-  sprintf(dateStr, "%s %d", monthNames[rtc.month-1], rtc.day);
-  int pos = (16 - strlen(dateStr)) / 2;
-  
-  lcd.setCursor(pos, 0);
-  lcd.print(dateStr);
-  
-  sprintf(dateStr, "%s", dayNames[rtc.week]);
-  pos = (16 - strlen(dateStr)) / 2;
-  lcd.setCursor(pos, 1);
-  lcd.print(dateStr);
-}
-
-void displayMinimalMode() {
-  lcd.clear();
-  int hour12 = rtc.hour % 12;
-  if (hour12 == 0) hour12 = 12;
-  
-  // 只显示时间，超简约模式
-  lcd.setCursor(4, 0);
-  lcd.printf("%2d:%02d", hour12, rtc.minute);
+  lcd.setCursor(0, 1);
+  lcd.write(byte(3));
+  lcd.printf(" %d lx", (int)environment.getLuminousIntensity());
 }
 
 void setup() {
@@ -200,20 +165,19 @@ void setup() {
   lcd.init();
   lcd.clear();
   
-  // 创建自定义字符
-lcd.customSymbol(0, clockChar);
-lcd.customSymbol(1, thermometer);
+  lcd.customSymbol(0, clockChar);
+  lcd.customSymbol(1, thermometer);
+  lcd.customSymbol(2, humidityChar);
+  lcd.customSymbol(3, lightChar);
   
   rtc.setup();
-  // Set initial time when needed (uncomment and modify as needed):
-//rtc.adjustRtc(F(__DATE__), F(__TIME__)); // Set from compile time
-  // rtc.adjustRtc(2024,10,23,13,50,0,4);  // 如需设置时间请取消注释
+  //rtc.adjustRtc(2024,10,24,4,14,28,10);
   
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("RTC initialized");
-  Serial.println("RTC initialized");
-  delay(2000);
+  while(environment.begin() != 0) {
+    lcd.clear();
+    lcd.print("Sensor Error!");
+    delay(1000);
+  }
   
   randomSeed(analogRead(0));
   colorDuration = random(3000, 10000);
@@ -225,48 +189,36 @@ lcd.customSymbol(1, thermometer);
 void loop() {
   unsigned long currentMillis = millis();
   
-  // 更新时间显示
-  if (currentMillis - lastUpdate >= 1000) {
+  if (currentMillis - lastUpdate >= 5000) {
+    showTimeMode = !showTimeMode;
     lastUpdate = currentMillis;
+  }
+  
+  if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
+    lastEnvUpdate = currentMillis;
     rtc.read();
     updateThemeColors(rtc.hour);
     
-    // 检查是否需要切换显示模式
-    if (currentMillis - modeChangeTime >= MODE_DURATION) {
-      modeChangeTime = currentMillis;
-      currentMode = (DisplayMode)((currentMode + 1) % 4);
+  // 在环境数据更新时调整亮度
+    adjustBrightness();
+
+    if (showTimeMode) {
+      displayTime();
+    } else {
+      displayEnvironmental();
     }
     
-    // 根据当前模式显示时间
-    switch(currentMode) {
-      case MODE_NORMAL:
-        displayNormalMode();
-        break;
-      case MODE_LARGE_TIME:
-        displayLargeTimeMode();
-        break;
-      case MODE_DATE_FOCUS:
-        displayDateFocusMode();
-        break;
-      case MODE_MINIMAL:
-        displayMinimalMode();
-        break;
-    }
-    
-    // 检查整点特效
     if (rtc.minute == 0 && rtc.second == 0) {
       inSpecialEffect = true;
       specialEffectStart = currentMillis;
     }
   }
   
-  // 处理整点特效
   if (inSpecialEffect) {
     handleSpecialEffect(currentMillis);
     return;
   }
   
-  // 正常的呼吸效果和颜色切换
   if (currentMillis - lastColorChange >= colorDuration) {
     lastColorChange = currentMillis;
     currentColor = (currentColor + 1) % numThemeColors;
@@ -275,8 +227,7 @@ void loop() {
     breatheIncreasing = false;
   }
   
-  // 呼吸效果
-  float breatheSpeed = 0.0015;
+  float breatheSpeed = 0.0005;
   if (breatheIncreasing) {
     breatheValue += breatheSpeed;
     if (breatheValue >= 1.0) {
@@ -291,7 +242,6 @@ void loop() {
     }
   }
   
-  // 应用当前主题颜色和呼吸效果
   setColor(
     currentThemeColors[currentColor][0],
     currentThemeColors[currentColor][1],
