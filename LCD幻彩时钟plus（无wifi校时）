@@ -23,7 +23,7 @@ float breatheValue = 0;
 bool breatheIncreasing = true;
 bool inSpecialEffect = false;
 int specialEffectStep = 0;
-
+float lastTemp = 0.0;  // 在全局变量区域添加这个变量
 // Custom characters
 byte clockChar[8] = {
   B00000, B01110, B10101, B10111,
@@ -74,6 +74,62 @@ const int SPECIAL_COLORS[][3] = {
 int currentThemeColors[4][3];
 int numThemeColors = 4;
 
+// 为每个星期设计不同的动画图案
+byte animationFrames[7][4][8] = {
+  // 星期日 - 太阳动画
+  {
+    {B00000,B00100,B10101,B01110,B11111,B01110,B10101,B00100},
+    {B00100,B10101,B01110,B11111,B01110,B10101,B00100,B00000},
+    {B10101,B01110,B11111,B01110,B10101,B00100,B00000,B00100},
+    {B01110,B11111,B01110,B10101,B00100,B00000,B00100,B10101}
+  },
+  // 星期一 - 月亮动画
+  {
+    {B00000,B00111,B01111,B01111,B01111,B01111,B00111,B00000},
+    {B00000,B01110,B11111,B11111,B11111,B11111,B01110,B00000},
+    {B00000,B11100,B11110,B11110,B11110,B11110,B11100,B00000},
+    {B00000,B01110,B11111,B11111,B11111,B11111,B01110,B00000}
+  },
+  // 星期二 - 雨滴动画
+  {
+    {B00000,B00100,B01110,B11111,B00000,B00100,B01110,B11111},
+    {B00100,B01110,B11111,B00000,B00100,B01110,B11111,B00000},
+    {B01110,B11111,B00000,B00100,B01110,B11111,B00000,B00100},
+    {B11111,B00000,B00100,B01110,B11111,B00000,B00100,B01110}
+  },
+  // 星期三 - 星星动画
+  {
+    {B00000,B00100,B01110,B11111,B01110,B10101,B01010,B00000},
+    {B00100,B01110,B11111,B01110,B10101,B01010,B00000,B00000},
+    {B01110,B11111,B01110,B10101,B01010,B00000,B00100,B00000},
+    {B11111,B01110,B10101,B01010,B00000,B00100,B01110,B00000}
+  },
+  // 星期四 - 心跳动画
+  {
+    {B00000,B01010,B11111,B11111,B01110,B00100,B00000,B00000},
+    {B01010,B11111,B11111,B01110,B00100,B00000,B00000,B00000},
+    {B11111,B11111,B01110,B00100,B00000,B00000,B01010,B00000},
+    {B11111,B01110,B00100,B00000,B00000,B01010,B11111,B00000}
+  },
+  // 星期五 - 音符动画
+  {
+    {B00100,B00110,B00101,B00100,B01100,B11100,B11100,B00000},
+    {B00110,B00101,B00100,B01100,B11100,B11100,B00000,B00100},
+    {B00101,B00100,B01100,B11100,B11100,B00000,B00100,B00110},
+    {B00100,B01100,B11100,B11100,B00000,B00100,B00110,B00101}
+  },
+  // 星期六 - 花朵动画
+  {
+    {B00000,B01010,B11111,B11111,B01110,B00100,B00000,B00000},
+    {B01010,B11111,B11111,B01110,B00100,B00000,B01010,B00000},
+    {B11111,B11111,B01110,B00100,B00000,B01010,B11111,B00000},
+    {B11111,B01110,B00100,B00000,B01010,B11111,B11111,B00000}
+  }
+};
+
+int currentFrame = 0;
+unsigned long lastFrameUpdate = 0;
+const unsigned long FRAME_INTERVAL = 300; // 动画帧更新间隔
 
 // 添加亮度控制相关的常量
 const int MIN_LIGHT = 0;    // 最小光照强度（lux）
@@ -137,14 +193,38 @@ void handleSpecialEffect(unsigned long currentMillis) {
 }
 
 void displayTime() {
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - lastFrameUpdate >= FRAME_INTERVAL) {
+    lastFrameUpdate = currentMillis;
+    currentFrame = (currentFrame + 1) % 4;
+    
+    // 更新动画字符
+    for(int i = 0; i < 4; i++) {
+      lcd.customSymbol(4 + i, animationFrames[rtc.week][(currentFrame + i) % 4]);
+    }
+  }
+  
   lcd.clear();
-  lcd.write(byte(0));
+  lcd.write(byte(0));  // 时钟图标
+  
+  // 显示时间
   lcd.setCursor(2, 0);
   lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
+  
+  // 在第一行右侧显示动画
+  lcd.setCursor(12, 0);
+  lcd.write(byte(4));
+  lcd.write(byte(5));
+  
+  // 显示日期和星期
   lcd.setCursor(0, 1);
   lcd.printf("%s %02d %s", monthNames[rtc.month-1], rtc.day, dayNames[rtc.week]);
-  lcd.setCursor(15, 1);
-  lcd.write(byte(1));
+  
+  // 在第二行右侧显示动画
+  lcd.setCursor(12, 1);
+  lcd.write(byte(6));
+  lcd.write(byte(7));
 }
 
 void displayEnvironmental() {
@@ -157,6 +237,111 @@ void displayEnvironmental() {
   lcd.setCursor(0, 1);
   lcd.write(byte(3));
   lcd.printf(" %d lx", (int)environment.getLuminousIntensity());
+}
+
+const struct {
+  int month;
+  int day;
+  const char* name;
+  const int colors[5][3];
+} HOLIDAYS[] = {
+  {1, 1, "New Year", {{255,0,0}, {255,215,0}, {255,255,255}, {255,192,203}, {255,69,0}}},
+  {12, 25, "Christmas", {{255,0,0}, {0,255,0}, {255,255,255}, {255,215,0}, {0,128,0}}},
+  // 可以添加更多节日
+};
+
+// 新增天气效果相关变量
+float tempHue = 0.0;
+float tempOffset = 0.0;
+bool isWeatherEffect = false;
+unsigned long weatherEffectStart = 0;
+const unsigned long WEATHER_EFFECT_DURATION = 5000;
+
+// 新增转场效果变量
+bool isTransitioning = false;
+unsigned long transitionStart = 0;
+const unsigned long TRANSITION_DURATION = 1000;
+int oldColors[3];
+int newColors[3];
+
+// 添加以下新函数
+
+// HSV转RGB颜色转换
+void hsvToRgb(float h, float s, float v, int* r, int* g, int* b) {
+  float c = v * s;
+  float x = c * (1 - abs(fmod(h / 60.0, 2) - 1));
+  float m = v - c;
+  
+  float rt, gt, bt;
+  if(h >= 0 && h < 60) {
+    rt = c; gt = x; bt = 0;
+  } else if(h >= 60 && h < 120) {
+    rt = x; gt = c; bt = 0;
+  } else if(h >= 120 && h < 180) {
+    rt = 0; gt = c; bt = x;
+  } else if(h >= 180 && h < 240) {
+    rt = 0; gt = x; bt = c;
+  } else if(h >= 240 && h < 300) {
+    rt = x; gt = 0; bt = c;
+  } else {
+    rt = c; gt = 0; bt = x;
+  }
+  
+  *r = (rt + m) * 255;
+  *g = (gt + m) * 255;
+  *b = (bt + m) * 255;
+}
+
+// 检查是否是特殊节日
+bool checkHoliday(int& index) {
+  for(int i = 0; i < sizeof(HOLIDAYS)/sizeof(HOLIDAYS[0]); i++) {
+    if(HOLIDAYS[i].month == rtc.month && HOLIDAYS[i].day == rtc.day) {
+      index = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+// 处理天气效果
+void handleWeatherEffect(unsigned long currentMillis) {
+  float temp = environment.getTemperature(TEMP_C);
+  float humidity = environment.getHumidity();
+  
+  // 根据温度调整色相
+  tempHue = map(temp, 0, 40, 240, 0); // 冷色到暖色
+  
+  // 根据湿度调整饱和度
+  float saturation = map(humidity, 0, 100, 0.3, 1.0);
+  
+  int r, g, b;
+  hsvToRgb(tempHue, saturation, 1.0, &r, &g, &b);
+  
+  // 添加波浪效果
+  float wave = sin(currentMillis * 0.001 + tempOffset) * 0.2 + 0.8;
+  setColor(r, g, b, wave);
+  
+  tempOffset += 0.1;
+}
+
+// 处理颜色转场效果
+void handleTransition(unsigned long currentMillis) {
+  if(!isTransitioning) return;
+  
+  float progress = (float)(currentMillis - transitionStart) / TRANSITION_DURATION;
+  if(progress >= 1.0) {
+    isTransitioning = false;
+    return;
+  }
+  
+  // 使用缓动函数使过渡更平滑
+  progress = 0.5 - cos(progress * PI) / 2;
+  
+  int r = oldColors[0] + (newColors[0] - oldColors[0]) * progress;
+  int g = oldColors[1] + (newColors[1] - oldColors[1]) * progress;
+  int b = oldColors[2] + (newColors[2] - oldColors[2]) * progress;
+  
+  setColor(r, g, b, breatheValue);
 }
 
 void setup() {
@@ -184,12 +369,15 @@ void setup() {
   
   rtc.read();
   updateThemeColors(rtc.hour);
+  for(int i = 0; i < 4; i++) {
+    lcd.customSymbol(4 + i, animationFrames[rtc.week][i]);
+  }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   
-  if (currentMillis - lastUpdate >= 5000) {
+  if (currentMillis - lastUpdate >= 10000) {
     showTimeMode = !showTimeMode;
     lastUpdate = currentMillis;
   }
@@ -197,36 +385,67 @@ void loop() {
   if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
     lastEnvUpdate = currentMillis;
     rtc.read();
-    updateThemeColors(rtc.hour);
     
-  // 在环境数据更新时调整亮度
+    // 检查是否是节日
+    int holidayIndex;
+    if(checkHoliday(holidayIndex)) {
+      inSpecialEffect = true;
+      specialEffectStart = currentMillis;
+      memcpy(currentThemeColors, HOLIDAYS[holidayIndex].colors, sizeof(HOLIDAYS[holidayIndex].colors));
+      numThemeColors = 5;
+    } else {
+      updateThemeColors(rtc.hour);
+      numThemeColors = 4;
+    }
+    
+    // 检查温度变化触发天气效果
+    float temp = environment.getTemperature(TEMP_C);
+    if(abs(temp - lastTemp) > 2.0) { // 温度变化超过2度
+      isWeatherEffect = true;
+      weatherEffectStart = currentMillis;
+    }
+    lastTemp = temp;
+    
     adjustBrightness();
-
+    
     if (showTimeMode) {
       displayTime();
     } else {
       displayEnvironmental();
     }
-    
-    if (rtc.minute == 0 && rtc.second == 0) {
-      inSpecialEffect = true;
-      specialEffectStart = currentMillis;
-    }
   }
   
+  // 处理各种特效
   if (inSpecialEffect) {
     handleSpecialEffect(currentMillis);
     return;
   }
   
-  if (currentMillis - lastColorChange >= colorDuration) {
-    lastColorChange = currentMillis;
-    currentColor = (currentColor + 1) % numThemeColors;
-    colorDuration = random(3000, 10000);
-    breatheValue = 1.0;
-    breatheIncreasing = false;
+  if (isWeatherEffect) {
+    if (currentMillis - weatherEffectStart > WEATHER_EFFECT_DURATION) {
+      isWeatherEffect = false;
+    } else {
+      handleWeatherEffect(currentMillis);
+      return;
+    }
   }
   
+  if (isTransitioning) {
+    handleTransition(currentMillis);
+    return;
+  }
+  
+  // 颜色切换时启动转场效果
+  if (currentMillis - lastColorChange >= colorDuration) {
+    memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
+    currentColor = (currentColor + 1) % numThemeColors;
+    memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
+    
+    isTransitioning = true;
+    transitionStart = currentMillis;
+    lastColorChange = currentMillis;
+    colorDuration = random(3000, 10000);
+  }
   float breatheSpeed = 0.0005;
   if (breatheIncreasing) {
     breatheValue += breatheSpeed;
