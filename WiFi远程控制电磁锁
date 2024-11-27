@@ -1,17 +1,71 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <EEPROM.h>
 
-// WiFi设置
-const char* ssid = "OnePlus 10 Pro";
-const char* password = "55132768";
+// AP模式的设置
+const char* ap_ssid = "ESP32_Setup";  // ESP32创建的热点名称
+const char* ap_password = "12345678"; // ESP32热点的密码
 
-// 继电器控制引脚
-const int relayPin = 10;  // ESP32的GPIO26连接继电器
+// EEPROM设置
+#define EEPROM_SIZE 512
+#define SSID_ADDR 0
+#define PASS_ADDR 32
+#define WIFI_CONFIG_FLAG_ADDR 96
 
 WebServer server(80);
+String saved_ssid;
+String saved_password;
+const int relayPin = 10;
+bool isAPMode = true;
 
-// 网页HTML代码
-const char index_html[] PROGMEM = R"rawliteral(
+// 配置页面HTML
+const char config_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WiFi配置</title>
+  <style>
+    html {font-family: Arial; display: inline-block; text-align: center;}
+    h2 {font-size: 2.3rem;}
+    p {font-size: 1.2rem;}
+    body {max-width: 400px; margin:0px auto; padding: 20px;}
+    input {
+      width: 80%;
+      padding: 12px 20px;
+      margin: 8px 0;
+      box-sizing: border-box;
+      border: 2px solid #ccc;
+      border-radius: 4px;
+    }
+    .button {
+      background-color: #4CAF50;
+      border: none;
+      color: white;
+      padding: 16px 40px;
+      text-decoration: none;
+      font-size: 20px;
+      margin: 2px;
+      cursor: pointer;
+      border-radius: 4px;
+      width: 80%;
+    }
+  </style>
+</head>
+<body>
+  <h2>WiFi配置</h2>
+  <form action="/saveconfig" method="POST">
+    <p>WiFi名称：<br><input type="text" name="ssid"></p>
+    <p>WiFi密码：<br><input type="password" name="password"></p>
+    <p><input type="submit" value="保存配置" class="button"></p>
+  </form>
+</body>
+</html>
+)rawliteral";
+
+// 控制页面HTML
+const char control_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
@@ -45,30 +99,123 @@ const char index_html[] PROGMEM = R"rawliteral(
   <p>
     <a href="/off"><button class="button button-off">关锁</button></a>
   </p>
+  <p>
+    <a href="/config"><button class="button" style="background-color: #2196F3;">重新配置WiFi</button></a>
+  </p>
 </body>
 </html>
 )rawliteral";
 
+void saveConfig(const char* ssid, const char* pass) {
+  EEPROM.write(WIFI_CONFIG_FLAG_ADDR, 1);  // 标记已配置
+  
+  // 保存SSID
+  for(int i = 0; i < strlen(ssid); i++) {
+    EEPROM.write(SSID_ADDR + i, ssid[i]);
+  }
+  EEPROM.write(SSID_ADDR + strlen(ssid), 0);
+  
+  // 保存密码
+  for(int i = 0; i < strlen(pass); i++) {
+    EEPROM.write(PASS_ADDR + i, pass[i]);
+  }
+  EEPROM.write(PASS_ADDR + strlen(pass), 0);
+  
+  EEPROM.commit();
+}
+
+void loadConfig() {
+  saved_ssid = "";
+  saved_password = "";
+  
+  if(EEPROM.read(WIFI_CONFIG_FLAG_ADDR) == 1) {
+    // 读取SSID
+    for(int i = 0; i < 32; i++) {
+      char c = EEPROM.read(SSID_ADDR + i);
+      if(c == 0) break;
+      saved_ssid += c;
+    }
+    
+    // 读取密码
+    for(int i = 0; i < 64; i++) {
+      char c = EEPROM.read(PASS_ADDR + i);
+      if(c == 0) break;
+      saved_password += c;
+    }
+  }
+}
+
+void startAPMode() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_password);
+  
+  Serial.println("AP模式已启动");
+  Serial.print("AP IP地址: ");
+  Serial.println(WiFi.softAPIP());
+  
+  isAPMode = true;
+}
+
+void startSTAMode() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(1000);
+    Serial.println("正在连接WiFi...");
+    attempts++;
+  }
+  
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi已连接");
+    Serial.print("IP地址: ");
+    Serial.println(WiFi.localIP());
+    isAPMode = false;
+  } else {
+    Serial.println("WiFi连接失败，切换到AP模式");
+    startAPMode();
+  }
+}
+
 void setup() {
   Serial.begin(115200);
-  
-  // 设置继电器引脚为输出模式
+  EEPROM.begin(EEPROM_SIZE);
   pinMode(relayPin, OUTPUT);
   digitalWrite(relayPin, LOW);
   
-  // 连接WiFi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("正在连接WiFi...");
-  }
-  Serial.println("WiFi已连接");
-  Serial.print("IP地址: ");
-  Serial.println(WiFi.localIP());
+  loadConfig();
   
-  // 设置Web服务器路由
+  if(saved_ssid.length() > 0 && saved_password.length() > 0) {
+    startSTAMode();
+  } else {
+    startAPMode();
+  }
+  
   server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", index_html);
+    if(isAPMode) {
+      server.send(200, "text/html", config_html);
+    } else {
+      server.send(200, "text/html", control_html);
+    }
+  });
+  
+  server.on("/config", HTTP_GET, []() {
+    server.send(200, "text/html", config_html);
+  });
+  
+  server.on("/saveconfig", HTTP_POST, []() {
+    String new_ssid = server.arg("ssid");
+    String new_password = server.arg("password");
+    
+    if(new_ssid.length() > 0) {
+      saveConfig(new_ssid.c_str(), new_password.c_str());
+      server.send(200, "text/html", "配置已保存，设备将重启...");
+      delay(2000);
+      ESP.restart();
+    } else {
+      server.send(400, "text/plain", "无效的配置");
+    }
   });
   
   server.on("/on", HTTP_GET, []() {
