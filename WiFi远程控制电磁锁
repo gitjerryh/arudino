@@ -3,8 +3,8 @@
 #include <EEPROM.h>
 
 // AP模式的设置
-const char* ap_ssid = "ESP32_Setup";  // ESP32创建的热点名称
-const char* ap_password = "12345678"; // ESP32热点的密码
+const char* ap_ssid = "ESP32_Setup";
+const char* ap_password = "12345678";
 
 // EEPROM设置
 #define EEPROM_SIZE 512
@@ -17,8 +17,9 @@ String saved_ssid;
 String saved_password;
 const int relayPin = 10;
 bool isAPMode = true;
+bool lockState = false;  // false表示锁住，true表示开启
 
-// 配置页面HTML
+// 配置页面HTML保持不变
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
@@ -64,7 +65,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// 控制页面HTML
+// 修改后的控制页面HTML
 const char control_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
@@ -87,21 +88,68 @@ const char control_html[] PROGMEM = R"rawliteral(
       margin: 2px;
       cursor: pointer;
       border-radius: 4px;
+      width: 80%;
     }
-    .button-off {background-color: #555555;}
+    .button-locked {
+      background-color: #4CAF50;
+    }
+    .button-unlocked {
+      background-color: #555555;
+    }
+    .config-button {
+      background-color: #2196F3;
+      font-size: 20px;
+      width: 60%;
+    }
   </style>
 </head>
 <body>
   <h2>ESP32电磁锁控制</h2>
   <p>
-    <a href="/on"><button class="button">开锁</button></a>
+    <button id="lockButton" class="button button-locked" onclick="toggleLock()">开锁</button>
   </p>
   <p>
-    <a href="/off"><button class="button button-off">关锁</button></a>
+    <a href="/config"><button class="button config-button">重新配置WiFi</button></a>
   </p>
-  <p>
-    <a href="/config"><button class="button" style="background-color: #2196F3;">重新配置WiFi</button></a>
-  </p>
+
+  <script>
+    var isLocked = true;
+    
+    function updateButtonState(locked) {
+      const button = document.getElementById('lockButton');
+      if (locked) {
+        button.textContent = '开锁';
+        button.className = 'button button-locked';
+      } else {
+        button.textContent = '关锁';
+        button.className = 'button button-unlocked';
+      }
+    }
+
+    function toggleLock() {
+      const button = document.getElementById('lockButton');
+      button.disabled = true;  // 禁用按钮防止重复点击
+      
+      fetch(isLocked ? '/toggle' : '/toggle')
+        .then(response => {
+          if (response.ok) {
+            isLocked = !isLocked;
+            updateButtonState(isLocked);
+          }
+        })
+        .finally(() => {
+          button.disabled = false;  // 重新启用按钮
+        });
+    }
+
+    // 页面加载时获取初始状态
+    fetch('/status')
+      .then(response => response.json())
+      .then(data => {
+        isLocked = data.locked;
+        updateButtonState(isLocked);
+      });
+  </script>
 </body>
 </html>
 )rawliteral";
@@ -123,6 +171,7 @@ void saveConfig(const char* ssid, const char* pass) {
   
   EEPROM.commit();
 }
+
 
 void loadConfig() {
   saved_ssid = "";
@@ -177,12 +226,12 @@ void startSTAMode() {
     startAPMode();
   }
 }
-
 void setup() {
   Serial.begin(115200);
   EEPROM.begin(EEPROM_SIZE);
   pinMode(relayPin, OUTPUT);
   digitalWrite(relayPin, LOW);
+  lockState = false;
   
   loadConfig();
   
@@ -218,16 +267,17 @@ void setup() {
     }
   });
   
-  server.on("/on", HTTP_GET, []() {
-    digitalWrite(relayPin, HIGH);
-    server.sendHeader("Location", "/");
-    server.send(303);
+  // 新的状态获取端点
+  server.on("/status", HTTP_GET, []() {
+    String response = "{\"locked\":" + String(lockState ? "false" : "true") + "}";
+    server.send(200, "application/json", response);
   });
   
-  server.on("/off", HTTP_GET, []() {
-    digitalWrite(relayPin, LOW);
-    server.sendHeader("Location", "/");
-    server.send(303);
+  // 新的切换端点
+  server.on("/toggle", HTTP_GET, []() {
+    lockState = !lockState;
+    digitalWrite(relayPin, lockState ? HIGH : LOW);
+    server.send(200, "text/plain", "OK");
   });
   
   server.begin();
