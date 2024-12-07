@@ -384,88 +384,181 @@ void setColor(int r, int g, int b, float intensity) {
 
 // 处理根路径请求
 void handleRoot() {
-  String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>";
-  html += "body{font-family:Arial;margin:20px;text-align:center;background:#f0f0f0;}";
-  html += ".container{max-width:600px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,0.1);}";
-  html += "h1,h2{color:#333;}";
-  html += ".btn{background:#4CAF50;color:white;border:none;padding:15px 30px;border-radius:5px;cursor:pointer;font-size:16px;margin:10px;}";
-  html += ".btn:hover{background:#45a049;}";
-  html += ".status{margin:20px;padding:10px;border-radius:5px;}";
-  html += ".success{background:#dff0d8;color:#3c763d;}";
-  html += ".error{background:#f2dede;color:#a94442;}";
-  html += ".wifi-list{margin:20px 0;text-align:left;}";
-  html += ".wifi-item{padding:10px;border:1px solid #ddd;margin:5px 0;border-radius:5px;cursor:pointer;}";
-  html += ".wifi-item:hover{background:#f5f5f5;}";
-  html += "</style></head>";
-  html += "<body><div class='container'>";
-  html += "<h1>ESP32 RTC Time Sync</h1>";
-  html += "<p>Current Time: <span id='current-time'></span></p>";
-  html += "<button class='btn' onclick='syncTime()'>Sync Time</button>";
-  html += "<div id='status' class='status'></div>";
-  
-  // 添加WiFi扫描按钮
-  html += "<h2>Available WiFi Networks</h2>";
-  html += "<button class='btn' onclick='scanWiFi()'>Scan WiFi</button>";
-  html += "<div id='wifi-list' class='wifi-list'></div>";
-  
-  // WiFi连接表单（初始隐藏）
-  html += "<div id='wifi-form' style='display:none;'>";
-  html += "<h2>Connect to WiFi</h2>";
-  html += "<form id='connect-form'>";
-  html += "<input type='hidden' id='selected-ssid' name='ssid'>";
-  html += "Password: <input type='password' name='password'><br><br>";
-  html += "<input type='submit' class='btn' value='Connect'>";
-  html += "</form></div>";
-  
-  // 添加JavaScript代码
-  html += "<script>";
-  // 更新时间的函数
-  html += "function updateTime() {";
-  html += "fetch('/time').then(r=>r.text()).then(t=>document.getElementById('current-time').innerHTML=t);";
-  html += "}";
-  html += "setInterval(updateTime, 1000);";
-  
-  // 同步时间函数
-  html += "function syncTime() {";
-  html += "document.getElementById('status').innerHTML='Syncing...';";
-  html += "fetch('/sync').then(r=>r.text()).then(data=>{";
-  html += "document.getElementById('status').innerHTML=data;";
-  html += "document.getElementById('status').className='status '+(data.includes('success')?'success':'error');";
-  html += "});}";
-  
-  // 扫描WiFi的函数
-  html += "function scanWiFi() {";
-  html += "document.getElementById('wifi-list').innerHTML = 'Scanning...';";
-  html += "fetch('/scan-wifi').then(r=>r.json()).then(networks=>{";
-  html += "let html = '';";
-  html += "networks.forEach(net => {";
-  html += "html += `<div class='wifi-item' onclick='selectWiFi(\"${net.ssid}\", ${net.rssi})'>${net.ssid} (${net.rssi}dBm)</div>`;";
-  html += "});";
-  html += "document.getElementById('wifi-list').innerHTML = html;";
-  html += "});}";
-  
-  // 选择WiFi的函数
-  html += "function selectWiFi(ssid) {";
-  html += "document.getElementById('selected-ssid').value = ssid;";
-  html += "document.getElementById('wifi-form').style.display = 'block';";
-  html += "}";
-  
-  // 处理表单提交
-  html += "document.getElementById('connect-form').onsubmit = function(e) {";
-  html += "e.preventDefault();";
-  html += "const formData = new FormData(e.target);";
-  html += "fetch('/connect-wifi', {";
-  html += "method: 'POST',";
-  html += "body: formData";
-  html += "}).then(r=>r.text()).then(data=>{";
-  html += "document.getElementById('status').innerHTML = data;";
-  html += "document.getElementById('status').className = 'status ' + (data.includes('success')?'success':'error');";
-  html += "});};";
-  
-  html += "</script></div></body></html>";
-  
-  server.send(200, "text/html", html);
+    String html = "<!DOCTYPE html><html><head>";
+    html += "<meta charset='UTF-8'>";  // 添加UTF-8编码支持
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    // 添加Google Fonts支持
+    html += "<link href='https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap' rel='stylesheet'>";
+    
+    html += "<style>";
+    // 基础样式
+    html += "* { margin: 0; padding: 0; box-sizing: border-box; }";
+    html += "body { font-family: 'Noto Sans SC', sans-serif; background: linear-gradient(45deg, #1a2a6c, #b21f1f, #fdbb2d); min-height: 100vh; }";
+    
+    // 容器样式
+    html += ".container { max-width: 90%; width: 400px; margin: 30px auto; background: rgba(255, 255, 255, 0.95); ";
+    html += "padding: 25px; border-radius: 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.1); backdrop-filter: blur(10px); }";
+    
+    // 标题样式
+    html += "h1 { color: #333; text-align: center; font-size: 24px; margin-bottom: 20px; }";
+    html += "h2 { color: #444; text-align: center; font-size: 18px; margin: 20px 0; }";
+    
+    // 时间显示样式
+    html += ".time-display { text-align: center; font-size: 20px; color: #333; margin: 15px 0; padding: 10px; }";
+    html += "#current-time { font-weight: bold; color: #1a2a6c; }";
+    
+    // 按钮样式
+    html += ".btn { background: linear-gradient(45deg, #1a2a6c, #2a3a7c); color: white; border: none; ";
+    html += "padding: 12px 25px; border-radius: 25px; cursor: pointer; font-size: 16px; width: 100%; ";
+    html += "margin: 10px 0; transition: all 0.3s ease; font-weight: 500; }";
+    html += ".btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.2); }";
+    
+    // WiFi列表样式
+    html += ".wifi-list { margin: 20px 0; }";
+    html += ".wifi-item { background: white; padding: 15px; margin: 8px 0; border-radius: 12px; ";
+    html += "cursor: pointer; transition: all 0.3s ease; display: flex; justify-content: space-between; ";
+    html += "align-items: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }";
+    html += ".wifi-item:hover { transform: translateX(5px); background: #f8f9fa; }";
+    
+    // 信号强度指示器
+    html += ".signal-strength { font-size: 14px; color: #666; }";
+    
+    // 状态消息样式
+    html += ".status { margin: 15px 0; padding: 12px; border-radius: 8px; text-align: center; transition: all 0.3s ease; }";
+    html += ".success { background: #d4edda; color: #155724; border-left: 4px solid #155724; }";
+    html += ".error { background: #f8d7da; color: #721c24; border-left: 4px solid #721c24; }";
+    
+    // 表单样式
+    html += ".form-control { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; ";
+    html += "border-radius: 8px; font-size: 16px; transition: all 0.3s ease; }";
+    html += ".form-control:focus { outline: none; border-color: #1a2a6c; box-shadow: 0 0 0 2px rgba(26,42,108,0.2); }";
+    
+    // 确保 wifi-form 在显示时位于正确的位置
+    html += "#wifi-form { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); ";
+    html += "background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); ";
+    html += "z-index: 1000; width: 90%; max-width: 400px; }";
+    
+    // 添加遮罩层样式
+    html += ".overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; ";
+    html += "background: rgba(0,0,0,0.5); z-index: 999; }";
+    
+    html += "</style></head>";
+    
+    // Body内容
+    html += "<body>";
+    html += "<div class='overlay' id='overlay'></div>";  // 添加遮罩层
+    html += "<div class='container'>";
+    html += "<h1>ESP32 智能时钟配置</h1>";
+    html += "<div class='time-display'>当前时间: <span id='current-time'>--:--:--</span></div>";
+    html += "<button class='btn' onclick='syncTime()'>同步时间</button>";
+    html += "<div id='status' class='status'></div>";
+    
+    html += "<h2>可用WiFi网络</h2>";
+    html += "<button class='btn' onclick='scanWiFi()'>扫描WiFi</button>";
+    html += "<div id='wifi-list' class='wifi-list'></div>";
+    
+    // WiFi连接表单
+    html += "<div id='wifi-form' style='display:none;'>";
+    html += "<div class='form-container' style='background:#f8f9fa; padding:20px; border-radius:12px; margin-top:20px; border:1px solid #dee2e6;'>";
+    html += "<h2 style='margin-bottom:15px;'>连接到 <span id='selected-wifi-name'></span></h2>";
+    html += "<form id='connect-form'>";
+    html += "<input type='hidden' id='selected-ssid' name='ssid'>";
+    html += "<div class='input-group' style='margin-bottom:15px;'>";
+    html += "<input type='password' name='password' class='form-control' placeholder='请输入WiFi密码' required>";
+    html += "</div>";
+    html += "<div class='button-group'>";
+    html += "<button type='button' class='btn' style='background:linear-gradient(45deg,#6c757d,#495057);margin-bottom:10px;' onclick='cancelConnect()'>取消</button>";
+    html += "<button type='submit' class='btn'>连接</button>";
+    html += "</div>";
+    html += "</form></div></div>";
+    
+    // JavaScript代码
+    html += "<script>";
+    // 更新时间函数
+    html += "function updateTime() {";
+    html += "fetch('/time').then(r=>r.text()).then(t=>{";
+    html += "document.getElementById('current-time').innerHTML=t;";
+    html += "}).catch(()=>{});";
+    html += "}";
+    html += "setInterval(updateTime,1000);";
+    
+    // 同步时间函数
+    html += "function syncTime() {";
+    html += "const status=document.getElementById('status');";
+    html += "status.innerHTML='正在同步...';";
+    html += "status.className='status';";
+    html += "fetch('/sync').then(r=>r.text()).then(data=>{";
+    html += "status.innerHTML=data.includes('success')?'同步成功！':'同步失败';";
+    html += "status.className='status '+(data.includes('success')?'success':'error');";
+    html += "});";
+    html += "}";
+    
+    // 扫描WiFi函数
+    html += "function scanWiFi() {";
+    html += "const list=document.getElementById('wifi-list');";
+    html += "list.innerHTML='<div style=\"text-align:center;color:#666;\">正在扫描...</div>';";
+    html += "fetch('/scan-wifi').then(r=>r.json()).then(networks=>{";
+    html += "let html='';";
+    html += "networks.sort((a,b)=>b.rssi-a.rssi).forEach(net=>{";
+    html += "const strength=net.rssi>-50?'强':net.rssi>-70?'中':'弱';";
+    html += "html+='<div class=\"wifi-item\" onclick=\"selectWiFi(\\''+net.ssid+'\\')\">';";
+    html += "html+='<span>'+net.ssid+'</span><span class=\"signal-strength\">信号:'+strength+'</span></div>';";
+    html += "});";
+    html += "list.innerHTML=html||'<div style=\"text-align:center;color:#666;\">未找到WiFi网络</div>';";
+    html += "}).catch(error => {";
+    html += "list.innerHTML='<div style=\"text-align:center;color:#721c24;\">扫描失败，请重试</div>';";
+    html += "console.error('Error:', error);";
+    html += "});";
+    html += "}";
+    
+    // 选择WiFi函数
+    html += "function selectWiFi(ssid){";
+    html += "document.getElementById('selected-ssid').value=ssid;";
+    html += "document.getElementById('selected-wifi-name').textContent=ssid;";
+    html += "document.getElementById('wifi-form').style.display='block';";
+    html += "document.getElementById('overlay').style.display='block';";
+    html += "document.querySelector('input[name=\"password\"]').focus();";
+    html += "}";
+    
+    // 添加取消连接的函数
+    html += "function cancelConnect(){";
+    html += "document.getElementById('wifi-form').style.display='none';";
+    html += "document.getElementById('overlay').style.display='none';";
+    html += "document.getElementById('connect-form').reset();";
+    html += "}";
+    
+    // 添加点击遮罩层关闭表单的功能
+    html += "document.getElementById('overlay').onclick=function(){";
+    html += "cancelConnect();";
+    html += "};";
+    
+    // 表单提交处理
+    html += "document.getElementById('connect-form').onsubmit=function(e){";
+    html += "e.preventDefault();";
+    html += "const status=document.getElementById('status');";
+    html += "const formData=new FormData(e.target);";
+    html += "status.innerHTML='正在连接...';";
+    html += "status.className='status';";
+    html += "fetch('/connect-wifi',{";
+    html += "method:'POST',";
+    html += "body:formData";
+    html += "}).then(r=>r.text()).then(data=>{";
+    html += "status.innerHTML=data.includes('success')?'连接成功！':'连接失败';";
+    html += "status.className='status '+(data.includes('success')?'success':'error');";
+    html += "if(data.includes('success')){";
+    html += "setTimeout(()=>{document.getElementById('wifi-form').style.display='none';";
+    html += "document.getElementById('overlay').style.display='none';},2000);";
+    html += "}";
+    html += "}).catch(error=>{";
+    html += "status.innerHTML='连接失败';";
+    html += "status.className='status error';";
+    html += "console.error('Error:', error);";
+    html += "});";
+    html += "};";
+    
+    html += "</script></div></body></html>";
+    
+    server.send(200, "text/html", html);
 }
 
 // 处理时间同步请求
@@ -902,12 +995,12 @@ void handleConnectWiFi() {
                     timeinfo.tm_hour,
                     timeinfo.tm_min,
                     timeinfo.tm_sec);
-      server.send(200, "text/plain", "Successfully connected and time synced!");
+      server.send(200, "text/plain", "success");
     } else {
-      server.send(200, "text/plain", "Connected to WiFi but failed to sync time");
+      server.send(200, "text/plain", "Connected but time sync failed");
     }
   } else {
-    server.send(500, "text/plain", "Failed to connect to WiFi");
+    server.send(500, "text/plain", "Connection failed");
   }
   
   // 恢复之前的WiFi模式
