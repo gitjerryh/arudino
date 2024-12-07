@@ -1027,7 +1027,7 @@ void handleTransition(unsigned long currentMillis) {
   setColor(r, g, b, breatheValue);
 }
 
-// 修改 handleHourlyEffect 函数，避免使用 lcd.clear() 并进一步调整亮度
+// 修改 handleHourlyEffect 函数
 void handleHourlyEffect(unsigned long currentMillis) {
     if (!isHourlyEffect || !currentHourlyEffect) {
         restoreOriginalChars();
@@ -1041,16 +1041,20 @@ void handleHourlyEffect(unsigned long currentMillis) {
         return;
     }
     
-    // 计算动画进度和帧
+    // 在整点特效期间强制显示时间模式
+    showTimeMode = true;
+    
+    // 清除屏幕以防止内容重叠
+    lcd.clear();
+    
     float progress = (float)effectElapsed / currentHourlyEffect->duration;
     int frame = (int)(progress * 8) % 8;
     
-    // 更新动画帧
     if (currentMillis - lastFrameUpdate >= 100) {
         lastFrameUpdate = currentMillis;
-        hourlyEffectFrame = (hourlyEffectFrame + 1) % 8; // 修改为8以匹配动画帧数量
+        hourlyEffectFrame = (hourlyEffectFrame + 1) % 8;
         
-        // 只使用4-7号位置更新特效动画
+        // 更新特效动画字符
         uint8_t tempPattern[8];
         for (int i = 0; i < 4; i++) {
             memcpy(tempPattern, currentHourlyEffect->patterns[hourlyEffectFrame % 8], 8);
@@ -1058,21 +1062,25 @@ void handleHourlyEffect(unsigned long currentMillis) {
         }
     }
     
-    // 不清除屏幕，直接覆盖时钟图标和时间
-    lcd.setCursor(0, 0);  // 假设时钟图标在 (0,0)
-    lcd.write(byte(0));    // 时钟图标
+    // 显示时钟图标和时间
+    lcd.setCursor(0, 0);
+    lcd.write(byte(0));
     lcd.setCursor(2, 0);
     lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
     
-    // 在剩余空间显示特效
+    // 显示日期和星期（在第二行）
+    lcd.setCursor(0, 1);
+    lcd.printf("%s %02d %s", monthNames[rtc.month-1], rtc.day, dayNames[rtc.week]);
+    
+    // 在右侧显示特效动画
     for(int i = 0; i < 4; i++) {
         lcd.setCursor(12 + (i % 2), i / 2);
         lcd.write(byte(4 + i));
     }
     
-    // 设置特效颜色，确保颜色索引在有效范围内，进一步调整强度以防止屏幕过亮
+    // 设置特效颜色
     int colorIndex = hourlyEffectFrame % 8;
-    float adjustedIntensity = 0.1 + 0.4 * (0.5 + sin(progress * PI * 2) * 0.5); // 调整亮度范围至0.3 - 0.7
+    float adjustedIntensity = 0.3 + 0.4 * (0.5 + sin(progress * PI * 2) * 0.5);
     
     setColor(
         currentHourlyEffect->colors[colorIndex][0],
@@ -1080,10 +1088,6 @@ void handleHourlyEffect(unsigned long currentMillis) {
         currentHourlyEffect->colors[colorIndex][2],
         adjustedIntensity
     );
-    
-    // 调试输出，帮助定位问题
-    Serial.printf("EffectElapsed: %lu, Frame: %d, ColorIndex: %d, Intensity: %.2f\n", 
-                  effectElapsed, frame, colorIndex, adjustedIntensity);
 }
 
 // 添加获取当前时间的处理函数
@@ -1216,7 +1220,7 @@ void setup() {
     memcpy(originalChars[3], lightChar, 8);
     
     rtc.setup();
-    //rtc.adjustRtc(2024,10,24,4,14,59,51);
+  rtc.adjustRtc(2024,10,24,4,14,59,51);
     
     while(environment.begin() != 0) {
         lcd.clear();
@@ -1266,12 +1270,12 @@ void loop() {
         colorNeedsUpdate = false;
     }
     
-    // 环境更新和显示逻辑
+    // 修改环境更新和显示逻辑
     if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
         lastEnvUpdate = currentMillis;
         rtc.read();
         
-        // 处理显示逻辑
+        // 只在非整点特效时处理显示逻辑
         if (!isHourlyEffect) {
             if (showTimeMode && !forceTimeDisplay) {
                 if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
@@ -1284,14 +1288,19 @@ void loop() {
                 }
             }
             
+            // 清除屏幕以防止内容重叠
+            lcd.clear();
+            
             if (showTimeMode) {
                 displayTime();
             } else {
                 displayEnvironmental();
             }
+        } else {
+            // 如果是整点特效，调用整点特效处理函数
+            handleHourlyEffect(currentMillis);
         }
         
-        // 调整亮度
         adjustBrightness();
     }
     
