@@ -28,7 +28,13 @@ const float MANUAL_MODE_BRIGHTNESS = 1.0;  // 手动模式下使用的亮度
 
 // 添加新的全局变量用于Web界面更新
 unsigned long lastWebUpdate = 0;
-const unsigned long WEB_UPDATE_INTERVAL = 100;  // Web界面更新间隔（100ms）
+const unsigned long WEB_UPDATE_INTERVAL = 50;  // 降低到50ms以提高更新频率
+const unsigned long COLOR_UPDATE_INTERVAL = 50; // 添加颜色更新间隔
+
+// 添加新的全局变量
+unsigned long lastColorUpdate = 0;
+bool colorNeedsUpdate = false;
+int pendingColors[3] = {0, 0, 0};
 
 // 函数声明
 void handleRoot();
@@ -623,14 +629,18 @@ void handleRoot() {
     html += "  const color = hslToRgb(hue/360, saturation, lightness);";
     html += "  const hexColor = rgbToHex(color[0], color[1], color[2]);";
     html += "  currentColor.style.backgroundColor = hexColor;";
-    html += "  console.log('Sending color:', color);";
-    html += "  fetch('/set-color', {";
-    html += "    method: 'POST',";
-    html += "    headers: {'Content-Type': 'application/json'},";
-    html += "    body: JSON.stringify({r: color[0], g: color[1], b: color[2]})";
-    html += "  }).then(response => response.json())";
-    html += "    .then(data => console.log('Server response:', data))";
-    html += "    .catch(error => console.error('Error:', error));";
+    
+    // 添加节流逻辑，限制请求频率
+    html += "  if(!window.colorUpdateTimeout) {";
+    html += "    window.colorUpdateTimeout = setTimeout(() => {";
+    html += "      fetch('/set-color', {";
+    html += "        method: 'POST',";
+    html += "        headers: {'Content-Type': 'application/json'},";
+    html += "        body: JSON.stringify({r: color[0], g: color[1], b: color[2]})";
+    html += "      });";
+    html += "      window.colorUpdateTimeout = null;";
+    html += "    }, 50);"; // 50ms 的节流时间
+    html += "  }";
     html += "}";
 
     html += "let touchMoved = false;";
@@ -1071,8 +1081,8 @@ void handleHourlyEffect(unsigned long currentMillis) {
 
 // 添加获取当前时间的处理函数
 void handleGetTime() {
-    char timeStr[20];
-    rtc.read();  // 确保时间是最新的
+    static char timeStr[20];
+    rtc.read();
     snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", 
              rtc.hour, rtc.minute, rtc.second);
     server.send(200, "text/plain", timeStr);
@@ -1169,18 +1179,11 @@ void handleSetColor() {
         return;
     }
     
-    int r = constrain(doc["r"].as<int>(), 0, 255);
-    int g = constrain(doc["g"].as<int>(), 0, 255);
-    int b = constrain(doc["b"].as<int>(), 0, 255);
-    
-    isManualColorControl = true;
-    lastColorControlTime = millis();
-    
-    manualColors[0] = r;
-    manualColors[1] = g;
-    manualColors[2] = b;
-    
-    setColor(r, g, b, MANUAL_MODE_BRIGHTNESS);
+    // 立即保存颜色值，但在主循环中应用
+    pendingColors[0] = constrain(doc["r"].as<int>(), 0, 255);
+    pendingColors[1] = constrain(doc["g"].as<int>(), 0, 255);
+    pendingColors[2] = constrain(doc["b"].as<int>(), 0, 255);
+    colorNeedsUpdate = true;
     
     // 快速响应
     server.send(200, "application/json", "{\"status\":\"success\"}");
@@ -1237,14 +1240,23 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
     
-    // 处理DNS和Web服务器请求，确保快速响应
+    // 优先处理 Web 服务器请求
     dnsServer.processNextRequest();
     server.handleClient();
     
-    // Web界面更新
-    if (currentMillis - lastWebUpdate >= WEB_UPDATE_INTERVAL) {
-        lastWebUpdate = currentMillis;
-        // Web相关的更新操作
+    // 处理颜色更新
+    if (colorNeedsUpdate && (currentMillis - lastColorUpdate >= COLOR_UPDATE_INTERVAL)) {
+        isManualColorControl = true;
+        lastColorControlTime = currentMillis;
+        
+        manualColors[0] = pendingColors[0];
+        manualColors[1] = pendingColors[1];
+        manualColors[2] = pendingColors[2];
+        
+        setColor(manualColors[0], manualColors[1], manualColors[2], MANUAL_MODE_BRIGHTNESS);
+        
+        lastColorUpdate = currentMillis;
+        colorNeedsUpdate = false;
     }
     
     // 环境更新和显示逻辑
@@ -1252,22 +1264,19 @@ void loop() {
         lastEnvUpdate = currentMillis;
         rtc.read();
         
-        // 添加概率切换逻辑
-        if (showTimeMode && !forceTimeDisplay && !isHourlyEffect) {  // 添加 !isHourlyEffect 条件
-            // 在时间显示模式下，有10%概率切换到环境显示
-            if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
-                showTimeMode = false;
-                envDisplayStartTime = currentMillis;
-            }
-        } else if (!showTimeMode && !isHourlyEffect) {  // 添加 !isHourlyEffect 条件
-            // 如果当前是环境显示模式，检查是否需要切回时间显示
-            if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
-                showTimeMode = true;
-            }
-        }
-        
-        // 显示更新 - 仅在没有整点特效时更新
+        // 处理显示逻辑
         if (!isHourlyEffect) {
+            if (showTimeMode && !forceTimeDisplay) {
+                if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
+                    showTimeMode = false;
+                    envDisplayStartTime = currentMillis;
+                }
+            } else if (!showTimeMode) {
+                if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
+                    showTimeMode = true;
+                }
+            }
+            
             if (showTimeMode) {
                 displayTime();
             } else {
@@ -1275,11 +1284,14 @@ void loop() {
             }
         }
         
+        // 调整亮度
         adjustBrightness();
-        
-        if (isManualColorControl) {
-            setColor(manualColors[0], manualColors[1], manualColors[2], MANUAL_MODE_BRIGHTNESS);
-        }
+    }
+    
+    // Web 界面更新
+    if (currentMillis - lastWebUpdate >= WEB_UPDATE_INTERVAL) {
+        lastWebUpdate = currentMillis;
+        // 可以在这里添加其他需要频繁更新的 Web 相关操作
     }
     
     // 检查手动控制是否超时
