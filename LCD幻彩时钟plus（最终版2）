@@ -36,6 +36,13 @@ unsigned long lastColorUpdate = 0;
 bool colorNeedsUpdate = false;
 int pendingColors[3] = {0, 0, 0};
 
+// 修改全局变量区域的呼吸效果相关常量
+const float BREATHE_MIN = 0.15;  // 最小亮度
+const float BREATHE_MAX = 1.0;   // 最大亮度
+const float BREATHE_SPEED_NORMAL = 0.002;  // 正常呼吸速度
+const float BREATHE_SPEED_SLOW = 0.001;    // 慢速呼吸速度
+float currentBreatheSpeed = BREATHE_SPEED_NORMAL;
+
 // 函数声明
 void handleRoot();
 void handleTimeSync();
@@ -1351,29 +1358,28 @@ void loop() {
                 transitionStart = currentMillis;
                 lastColorChange = currentMillis;
                 colorDuration = random(1000, 10000);
+                
+                // 随机变化呼吸速度，使效果更自然
+                currentBreatheSpeed = random(100) < 30 ? BREATHE_SPEED_SLOW : BREATHE_SPEED_NORMAL;
             }
             
-            float breatheSpeed = 0.0005;
-            if (breatheIncreasing) {
-                breatheValue += breatheSpeed;
-                if (breatheValue >= 1.0) {
-                    breatheValue = 1.0;
-                    breatheIncreasing = false;
-                }
-            } else {
-                breatheValue -= breatheSpeed;
-                if (breatheValue <= 0.3) {
-                    breatheValue = 0.3;
-                    breatheIncreasing = true;
-                }
-            }
+            // 使用正弦函数实现更平滑的呼吸效果
+            float breatheProgress = (sin(currentMillis * currentBreatheSpeed) + 1.0) / 2.0;
+            breatheValue = BREATHE_MIN + (BREATHE_MAX - BREATHE_MIN) * breatheProgress;
             
-            setColor(
-                currentThemeColors[currentColor][0],
-                currentThemeColors[currentColor][1],
-                currentThemeColors[currentColor][2],
-                breatheValue
-            );
+            // 添加随机微小扰动，使呼吸效果更自然
+            float randomFlutter = (random(-10, 10) / 1000.0);
+            breatheValue = constrain(breatheValue + randomFlutter, BREATHE_MIN, BREATHE_MAX);
+            
+            // 应用颜色和呼吸效果
+            if (!isManualColorControl) {
+                setColor(
+                    currentThemeColors[currentColor][0],
+                    currentThemeColors[currentColor][1],
+                    currentThemeColors[currentColor][2],
+                    breatheValue
+                );
+            }
         }
     }
 
