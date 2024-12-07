@@ -1253,24 +1253,26 @@ void loop() {
         rtc.read();
         
         // 添加概率切换逻辑
-        if (showTimeMode && !forceTimeDisplay) {
+        if (showTimeMode && !forceTimeDisplay && !isHourlyEffect) {  // 添加 !isHourlyEffect 条件
             // 在时间显示模式下，有10%概率切换到环境显示
             if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
                 showTimeMode = false;
                 envDisplayStartTime = currentMillis;
             }
-        } else if (!showTimeMode) {
+        } else if (!showTimeMode && !isHourlyEffect) {  // 添加 !isHourlyEffect 条件
             // 如果当前是环境显示模式，检查是否需要切回时间显示
             if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
                 showTimeMode = true;
             }
         }
         
-        // 显示更新
-        if (showTimeMode) {
-            displayTime();
-        } else {
-            displayEnvironmental();
+        // 显示更新 - 仅在没有整点特效时更新
+        if (!isHourlyEffect) {
+            if (showTimeMode) {
+                displayTime();
+            } else {
+                displayEnvironmental();
+            }
         }
         
         adjustBrightness();
@@ -1310,6 +1312,23 @@ void loop() {
         } else if (isHourlyEffect) {
             handleHourlyEffect(currentMillis);
         } else {
+            // 检查是否需要触发整点特效
+            if (rtc.minute == 0 && rtc.second == 0 && !isHourlyEffect) {
+                isHourlyEffect = true;
+                hourlyEffectStart = currentMillis;
+                
+                // 根据当前小时选择对应的整点特效
+                if (rtc.hour >= 6 && rtc.hour < 12) {
+                    currentHourlyEffect = &MORNING_EFFECT;
+                } else if (rtc.hour >= 12 && rtc.hour < 18) {
+                    currentHourlyEffect = &DAY_EFFECT;
+                } else if (rtc.hour >= 18 && rtc.hour < 22) {
+                    currentHourlyEffect = &EVENING_EFFECT;
+                } else {
+                    currentHourlyEffect = &NIGHT_EFFECT;
+                }
+            }
+            
             // 正常的颜色渐变和呼吸效果
             if (currentMillis - lastColorChange >= colorDuration) {
                 memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
@@ -1355,4 +1374,7 @@ void loop() {
     if (timeNeedSync && syncTimeFromNTP()) {
         timeNeedSync = false;
     }
+    
+    // 调用高级整点特效处理函数
+    handleAdvancedHourlyEffect();
 }
