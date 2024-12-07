@@ -2,6 +2,42 @@
 #include "GravityRtc.h"
 #include "DFRobot_RGBLCD1602.h"
 #include "DFRobot_EnvironmentalSensor.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <time.h>
+
+// AP模式的配置
+const char* AP_SSID = "ESP32_RTC_Config";  // AP模式的SSID
+const char* AP_PASSWORD = "12345678";       // AP模式的密码
+IPAddress apIP(192, 168, 4, 1);            // AP模式的IP地址
+DNSServer dnsServer;
+WebServer server(80);
+
+// 函数声明
+void handleRoot();
+void handleTimeSync();
+void handleNotFound();
+void handleScanWiFi();
+void handleConnectWiFi();
+void restoreOriginalChars();
+void displayTime();
+void displayEnvironmental();
+void handleSpecialEffect(unsigned long currentMillis);
+void handleAdvancedHourlyEffect();
+void handleHourlyEffect(unsigned long currentMillis);
+void handleWeatherEffect(unsigned long currentMillis);
+void handleTransition(unsigned long currentMillis);
+
+// NTP服务器配置
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 8 * 3600;  // 以中国时区为例，UTC+8
+const int   daylightOffset_sec = 0;
+
+// 时间同步状态
+bool timeNeedSync = false;
+unsigned long lastSyncAttempt = 0;
+const unsigned long SYNC_INTERVAL = 24 * 60 * 60 * 1000; // 24小时同步一次
 
 GravityRtc rtc;
 DFRobot_RGBLCD1602 lcd(0x2D, 16, 2);
@@ -18,12 +54,18 @@ unsigned long specialEffectStart = 0;
 const unsigned long ENV_UPDATE_INTERVAL = 1000;
 bool showTimeMode = true;
 
+const unsigned long ENV_DISPLAY_DURATION = 3000;  // 环境显示持续5秒
+const float ENV_DISPLAY_PROBABILITY = 0.1;        // 10%的概率切换到环境显示
+unsigned long envDisplayStartTime = 0;            // 环境显示开始时间
+bool forceTimeDisplay = true;                     // 强制时间显示标志
+
 int currentColor = 0;
 float breatheValue = 0;
 bool breatheIncreasing = true;
 bool inSpecialEffect = false;
 int specialEffectStep = 0;
 float lastTemp = 0.0;  // 在全局变量区域添加这个变量
+
 // Custom characters
 byte clockChar[8] = {
   B00000, B01110, B10101, B10111,
@@ -47,23 +89,47 @@ byte lightChar[8] = {
 
 // Color themes
 const int MORNING_COLORS[][3] = {
-  {255, 200, 100}, {255, 150, 50},
-  {255, 180, 120}, {200, 150, 100}
+    {255, 200, 100},  // 原有的暖黄色
+    {255, 150, 50},   // 原有的橙色
+    {255, 180, 120},  // 原有的浅橙色
+    {200, 150, 100},  // 原有的暖棕色
+    {255, 140, 0},    // 新增：深橙色
+    {255, 215, 150},  // 新增：杏仁色
+    {255, 127, 80},   // 新增：珊瑚色
+    {255, 190, 150}   // 新增：蜜桃色
 };
 
 const int DAY_COLORS[][3] = {
-  {100, 200, 255}, {150, 255, 200},
-  {255, 255, 200}, {200, 255, 255}
+    {100, 200, 255},  // 原有的天蓝色
+    {150, 255, 200},  // 原有的青绿色
+    {255, 255, 200},  // 原有的暖白色
+    {200, 255, 255},  // 原有的浅青色
+    {0, 191, 255},    // 新增：深天蓝
+    {127, 255, 170},  // 新增：碧绿色
+    {64, 224, 208},   // 新增：绿松石色
+    {135, 206, 250}   // 新增：淡天蓝
 };
 
 const int EVENING_COLORS[][3] = {
-  {255, 100, 100}, {255, 150, 50},
-  {200, 100, 150}, {150, 100, 200}
+    {255, 100, 100},  // 原有的粉红色
+    {255, 150, 50},   // 原有的橙色
+    {200, 100, 150},  // 原有的紫粉色
+    {150, 100, 200},  // 原有的淡紫色
+    {255, 69, 0},     // 新增：红橙色
+    {255, 20, 147},   // 新增：深粉色
+    {219, 112, 147},  // 新增：浅紫红
+    {186, 85, 211}    // 新增：中紫色
 };
 
 const int NIGHT_COLORS[][3] = {
-  {50, 50, 150}, {100, 50, 150},
-  {50, 100, 150}, {100, 100, 200}
+    {50, 50, 150},    // 原有的深蓝色
+    {100, 50, 150},   // 原有的蓝紫色
+    {50, 100, 150},   // 原有的靛蓝色
+    {100, 100, 200},  // 原有的淡蓝紫色
+    {25, 25, 112},    // 新增：午夜蓝
+    {72, 61, 139},    // 新增：暗紫色
+    {0, 0, 128},      // 新增：海军蓝
+    {138, 43, 226}    // 新增：紫罗兰色
 };
 
 const int SPECIAL_COLORS[][3] = {
@@ -71,8 +137,10 @@ const int SPECIAL_COLORS[][3] = {
   {255, 0, 0}, {0, 255, 0}, {0, 0, 255}
 };
 
-int currentThemeColors[4][3];
-int numThemeColors = 4;
+
+
+int currentThemeColors[8][3];
+int numThemeColors = 8;
 
 // 为每个星期设计不同的动画图案
 byte animationFrames[7][4][8] = {
@@ -85,17 +153,17 @@ byte animationFrames[7][4][8] = {
   },
   // 星期一 - 月亮动画
   {
-    {B00000,B00111,B01111,B01111,B01111,B01111,B00111,B00000},
-    {B00000,B01110,B11111,B11111,B11111,B11111,B01110,B00000},
-    {B00000,B11100,B11110,B11110,B11110,B11110,B11100,B00000},
-    {B00000,B01110,B11111,B11111,B11111,B11111,B01110,B00000}
+    {B10000,B01000,B00100,B00010,B00000,B00000,B00000,B00000},
+    {B00000,B10000,B01000,B00100,B00010,B00000,B00000,B00000},
+    {B00000,B00000,B10000,B01000,B00100,B00010,B00000,B00000},
+    {B00000,B00000,B00000,B10000,B01000,B00100,B00010,B00000}
   },
-  // 星期二 - 雨滴动画
+  // 星期二 - 风车动画
   {
-    {B00000,B00100,B01110,B11111,B00000,B00100,B01110,B11111},
-    {B00100,B01110,B11111,B00000,B00100,B01110,B11111,B00000},
-    {B01110,B11111,B00000,B00100,B01110,B11111,B00000,B00100},
-    {B11111,B00000,B00100,B01110,B11111,B00000,B00100,B01110}
+  {B00100, B00100, B11111, B00100, B00100, B00000, B00000, B00000},
+  {B00000, B00100, B00100, B11111, B00100, B00100, B00000, B00000},
+  {B00000, B00000, B00100, B00100, B11111, B00100, B00100, B00000},
+  {B00000, B00000, B00000, B00100, B00100, B11111, B00100, B00100}
   },
   // 星期三 - 星星动画
   {
@@ -120,16 +188,17 @@ byte animationFrames[7][4][8] = {
   },
   // 星期六 - 花朵动画
   {
-    {B00000,B01010,B11111,B11111,B01110,B00100,B00000,B00000},
-    {B01010,B11111,B11111,B01110,B00100,B00000,B01010,B00000},
-    {B11111,B11111,B01110,B00100,B00000,B01010,B11111,B00000},
-    {B11111,B01110,B00100,B00000,B01010,B11111,B11111,B00000}
+    {B00100,B01110,B00100,B00000,B00000,B00000,B00000,B00000},
+    {B00000,B01110,B01110,B01110,B00000,B00000,B00000,B00000},
+    {B00000,B10101,B01110,B10101,B01110,B00100,B00000,B00000},
+    {B10101,B01110,B11111,B01110,B10101,B01010,B00100,B00000}
   }
 };
 
+
 int currentFrame = 0;
 unsigned long lastFrameUpdate = 0;
-const unsigned long FRAME_INTERVAL = 300; // 动画帧更新间隔
+const unsigned long FRAME_INTERVAL = 100; // 动画帧更新间隔
 
 // 添加亮度控制相关的常量
 const int MIN_LIGHT = 0;    // 最小光照强度（lux）
@@ -138,6 +207,172 @@ const float MIN_BRIGHTNESS = 0.2; // 最小亮度比例
 const float MAX_BRIGHTNESS = 1.0; // 最大亮度比例
 float currentBrightness = MAX_BRIGHTNESS;
 
+// 新增整点特效相关变量
+struct HourlyEffect {
+    byte patterns[8][8];  // 整点动画帧
+    int colors[8][3];     // 整点颜色序列
+    int duration;         // 效果持续时间(ms)
+    byte type;           // 效果类型(0:扫描, 1:闪烁, 2:波浪, 3:螺旋)
+};
+
+// Improved morning effect (Sunrise spiral)
+const HourlyEffect MORNING_EFFECT = {
+    {
+        {B00000,B00000,B00000,B00100,B00000,B00000,B00000,B00000},
+        {B00000,B00000,B01110,B01110,B01110,B00000,B00000,B00000},
+        {B00000,B01110,B11111,B11111,B11111,B01110,B00000,B00000},
+        {B00100,B01110,B11111,B11111,B11111,B01110,B00100,B00000},
+        {B01110,B11111,B11111,B11111,B11111,B11111,B01110,B00000},
+        {B11111,B11111,B11111,B11111,B11111,B11111,B11111,B00000},
+        {B11111,B11111,B11111,B11111,B11111,B11111,B11111,B11111},
+        {B01110,B11111,B11111,B11111,B11111,B11111,B01110,B00000}
+    },
+    {
+        {255,100,0}, {255,120,20}, {255,140,40}, {255,160,60},
+        {255,180,80}, {255,200,100}, {255,220,120}, {255,240,140}
+    },
+    5000,
+    0
+};
+
+// New day effect (Pulsing sun rays)
+const HourlyEffect DAY_EFFECT = {
+    {
+        {B10101,B01110,B11111,B01110,B10101,B00000,B00000,B00000},
+        {B00000,B10101,B01110,B11111,B01110,B10101,B00000,B00000},
+        {B00000,B00000,B10101,B01110,B11111,B01110,B10101,B00000},
+        {B00000,B00000,B00000,B10101,B01110,B11111,B01110,B10101},
+        {B10101,B00000,B00000,B00000,B10101,B01110,B11111,B01110},
+        {B01110,B10101,B00000,B00000,B00000,B10101,B01110,B11111},
+        {B11111,B01110,B10101,B00000,B00000,B00000,B10101,B01110},
+        {B01110,B11111,B01110,B10101,B00000,B00000,B00000,B10101}
+    },
+    {
+        {100,200,255}, {150,220,255}, {200,240,255}, {255,255,200},
+        {255,240,150}, {255,220,100}, {200,240,255}, {150,220,255}
+    },
+    6000,
+    1
+};
+
+// Improved evening effect (Sunset waves)
+const HourlyEffect EVENING_EFFECT = {
+    {
+        {B11111,B11111,B00000,B00000,B00000,B00000,B00000,B00000},
+        {B01111,B11111,B11111,B00000,B00000,B00000,B00000,B00000},
+        {B00111,B01111,B11111,B11111,B00000,B00000,B00000,B00000},
+        {B00011,B00111,B01111,B11111,B11111,B00000,B00000,B00000},
+        {B00001,B00011,B00111,B01111,B11111,B11111,B00000,B00000},
+        {B00000,B00001,B00011,B00111,B01111,B11111,B11111,B00000},
+        {B00000,B00000,B00001,B00011,B00111,B01111,B11111,B11111},
+        {B00000,B00000,B00000,B00001,B00011,B00111,B01111,B11111}
+    },
+    {
+        {255,50,0}, {255,30,0}, {200,20,0}, {150,10,0},
+        {100,5,0}, {50,0,0}, {25,0,0}, {10,0,0}
+    },
+    4000,
+    2
+};
+
+// Enhanced night effect (Twinkling stars)
+const HourlyEffect NIGHT_EFFECT = {
+    {
+        {B10001,B00000,B00100,B00000,B10001,B00000,B00100,B00000},
+        {B00000,B01010,B00000,B00100,B00000,B01010,B00000,B00100},
+        {B00100,B00000,B10001,B00000,B00100,B00000,B10001,B00000},
+        {B00000,B00100,B00000,B01010,B00000,B00100,B00000,B01010},
+        {B01010,B00000,B00100,B00000,B01010,B00000,B00100,B00000},
+        {B00000,B10001,B00000,B00100,B00000,B10001,B00000,B00100},
+        {B00100,B00000,B01010,B00000,B00100,B00000,B01010,B00000},
+        {B00000,B00100,B00000,B10001,B00000,B00100,B00000,B10001}
+    },
+    {
+        {50,50,150}, {40,40,130}, {30,30,110}, {20,20,90},
+        {10,10,70}, {5,5,50}, {20,20,90}, {40,40,130}
+    },
+    7000,
+    3
+};
+bool isHourlyEffect = false;
+unsigned long hourlyEffectStart = 0;
+int hourlyEffectFrame = 0;
+const HourlyEffect* currentHourlyEffect = nullptr;
+
+// 添加全局变量用于保存原始字符
+byte originalChars[4][8];  // 保存0-3号位置的原始字符
+
+bool syncTimeFromNTP() {
+  struct tm timeinfo;
+  bool success = false;
+  
+  // 保存当前WiFi模式
+  WiFiMode_t currentMode = WiFi.getMode();
+  
+  // 切换到STA模式并尝试连接WiFi
+  WiFi.mode(WIFI_STA);
+  
+  // 扫描可用网络
+  int n = WiFi.scanNetworks();
+  if (n > 0) {
+    // 这里可以添加已知的WiFi凭据
+    const char* known_ssids[] = {"Your_SSID_1", "Your_SSID_2"};
+    const char* known_passwords[] = {"Your_Password_1", "Your_Password_2"};
+    const int known_networks = sizeof(known_ssids) / sizeof(known_ssids[0]);
+    
+    for (int i = 0; i < n; i++) {
+      String ssid = WiFi.SSID(i);
+      for (int j = 0; j < known_networks; j++) {
+        if (ssid.equals(known_ssids[j])) {
+          // 尝试连接已知网络
+          WiFi.begin(known_ssids[j], known_passwords[j]);
+          
+          // 等待连接，最多等待10秒
+          int attempts = 0;
+          while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500);
+            attempts++;
+          }
+          
+          if (WiFi.status() == WL_CONNECTED) {
+            // 配置NTP
+            configTime(gmtOffset_sec, daylightOffset_sec, ntpServer, "time.nist.gov", "time.windows.com");
+            
+            // 等待NTP同步，最多等待5秒
+            int timeoutCount = 0;
+            while (!getLocalTime(&timeinfo) && timeoutCount < 10) {
+              delay(500);
+              timeoutCount++;
+            }
+            
+            if (getLocalTime(&timeinfo)) {
+              // 更新RTC时间
+              rtc.adjustRtc(timeinfo.tm_year + 1900, 
+                          timeinfo.tm_mon + 1,
+                          timeinfo.tm_mday,
+                          timeinfo.tm_wday,
+                          timeinfo.tm_hour,
+                          timeinfo.tm_min,
+                          timeinfo.tm_sec);
+              success = true;
+              break;
+            }
+          }
+        }
+      }
+      if (success) break;
+    }
+  }
+  
+  // 断开WiFi连接
+  WiFi.disconnect(true);
+  
+  // 恢复之前的WiFi模式
+  WiFi.mode(currentMode);
+  
+  return success;
+}
+
 void setColor(int r, int g, int b, float intensity) {
   intensity *= currentBrightness; // 应用全局亮度设置
   lcd.setPWM(lcd.REG_RED, r * intensity);
@@ -145,10 +380,129 @@ void setColor(int r, int g, int b, float intensity) {
   lcd.setPWM(lcd.REG_BLUE, b * intensity);
 }
 
+
+
+// 处理根路径请求
+void handleRoot() {
+  String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>";
+  html += "body{font-family:Arial;margin:20px;text-align:center;background:#f0f0f0;}";
+  html += ".container{max-width:600px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,0.1);}";
+  html += "h1,h2{color:#333;}";
+  html += ".btn{background:#4CAF50;color:white;border:none;padding:15px 30px;border-radius:5px;cursor:pointer;font-size:16px;margin:10px;}";
+  html += ".btn:hover{background:#45a049;}";
+  html += ".status{margin:20px;padding:10px;border-radius:5px;}";
+  html += ".success{background:#dff0d8;color:#3c763d;}";
+  html += ".error{background:#f2dede;color:#a94442;}";
+  html += ".wifi-list{margin:20px 0;text-align:left;}";
+  html += ".wifi-item{padding:10px;border:1px solid #ddd;margin:5px 0;border-radius:5px;cursor:pointer;}";
+  html += ".wifi-item:hover{background:#f5f5f5;}";
+  html += "</style></head>";
+  html += "<body><div class='container'>";
+  html += "<h1>ESP32 RTC Time Sync</h1>";
+  html += "<p>Current Time: <span id='current-time'></span></p>";
+  html += "<button class='btn' onclick='syncTime()'>Sync Time</button>";
+  html += "<div id='status' class='status'></div>";
+  
+  // 添加WiFi扫描按钮
+  html += "<h2>Available WiFi Networks</h2>";
+  html += "<button class='btn' onclick='scanWiFi()'>Scan WiFi</button>";
+  html += "<div id='wifi-list' class='wifi-list'></div>";
+  
+  // WiFi连接表单（初始隐藏）
+  html += "<div id='wifi-form' style='display:none;'>";
+  html += "<h2>Connect to WiFi</h2>";
+  html += "<form id='connect-form'>";
+  html += "<input type='hidden' id='selected-ssid' name='ssid'>";
+  html += "Password: <input type='password' name='password'><br><br>";
+  html += "<input type='submit' class='btn' value='Connect'>";
+  html += "</form></div>";
+  
+  // 添加JavaScript代码
+  html += "<script>";
+  // 更新时间的函数
+  html += "function updateTime() {";
+  html += "fetch('/time').then(r=>r.text()).then(t=>document.getElementById('current-time').innerHTML=t);";
+  html += "}";
+  html += "setInterval(updateTime, 1000);";
+  
+  // 同步���间函数
+  html += "function syncTime() {";
+  html += "document.getElementById('status').innerHTML='Syncing...';";
+  html += "fetch('/sync').then(r=>r.text()).then(data=>{";
+  html += "document.getElementById('status').innerHTML=data;";
+  html += "document.getElementById('status').className='status '+(data.includes('success')?'success':'error');";
+  html += "});}";
+  
+  // 扫描WiFi的函数
+  html += "function scanWiFi() {";
+  html += "document.getElementById('wifi-list').innerHTML = 'Scanning...';";
+  html += "fetch('/scan-wifi').then(r=>r.json()).then(networks=>{";
+  html += "let html = '';";
+  html += "networks.forEach(net => {";
+  html += "html += `<div class='wifi-item' onclick='selectWiFi(\"${net.ssid}\", ${net.rssi})'>${net.ssid} (${net.rssi}dBm)</div>`;";
+  html += "});";
+  html += "document.getElementById('wifi-list').innerHTML = html;";
+  html += "});}";
+  
+  // 选择WiFi的函数
+  html += "function selectWiFi(ssid) {";
+  html += "document.getElementById('selected-ssid').value = ssid;";
+  html += "document.getElementById('wifi-form').style.display = 'block';";
+  html += "}";
+  
+  // 处理表单提交
+  html += "document.getElementById('connect-form').onsubmit = function(e) {";
+  html += "e.preventDefault();";
+  html += "const formData = new FormData(e.target);";
+  html += "fetch('/connect-wifi', {";
+  html += "method: 'POST',";
+  html += "body: formData";
+  html += "}).then(r=>r.text()).then(data=>{";
+  html += "document.getElementById('status').innerHTML = data;";
+  html += "document.getElementById('status').className = 'status ' + (data.includes('success')?'success':'error');";
+  html += "});};";
+  
+  html += "</script></div></body></html>";
+  
+  server.send(200, "text/html", html);
+}
+
+// 处理时间同步请求
+void handleTimeSync() {
+  if (syncTimeFromNTP()) {
+    server.send(200, "text/plain", "Time synced successfully!");
+  } else {
+    server.send(500, "text/plain", "Failed to sync time!");
+  }
+}
+
+// 处理404请求
+void handleNotFound() {
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
+}
+void setupAP() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  // 配置DNS服务器，将所有域名请求定向到ESP32
+  dnsServer.start(53, "*", apIP);
+
+  // 配置Web服务器路由
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/sync", HTTP_GET, handleTimeSync);
+  server.on("/scan-wifi", HTTP_GET, handleScanWiFi);  // 新增
+  server.on("/connect-wifi", HTTP_POST, handleConnectWiFi);  // 新增
+  server.onNotFound(handleNotFound);
+  
+  server.begin();
+}
 void adjustBrightness() {
   int lightIntensity = environment.getLuminousIntensity();
   
-  // 将光照强度限制在有效范围内
+  // 将光照强限制在有效范围内
   lightIntensity = constrain(lightIntensity, MIN_LIGHT, MAX_LIGHT);
   
   // 使用映射函数计算亮度
@@ -156,7 +510,7 @@ void adjustBrightness() {
     (MAX_BRIGHTNESS - MIN_BRIGHTNESS) * 
     (float)(lightIntensity - MIN_LIGHT) / (MAX_LIGHT - MIN_LIGHT);
     
-  // 使用指数曲线使亮度变化更自然
+  // 使用指数线使亮度变化更自
   currentBrightness = pow(currentBrightness, 0.5);
 }
 
@@ -193,13 +547,18 @@ void handleSpecialEffect(unsigned long currentMillis) {
 }
 
 void displayTime() {
+  // 确保正确的字符设置
+  if (!isHourlyEffect) {
+    restoreOriginalChars();
+  }
+  
   unsigned long currentMillis = millis();
   
   if (currentMillis - lastFrameUpdate >= FRAME_INTERVAL) {
     lastFrameUpdate = currentMillis;
     currentFrame = (currentFrame + 1) % 4;
     
-    // 更新动画字符
+    // 更新动画字符（使用4-7号位置）
     for(int i = 0; i < 4; i++) {
       lcd.customSymbol(4 + i, animationFrames[rtc.week][(currentFrame + i) % 4]);
     }
@@ -228,14 +587,19 @@ void displayTime() {
 }
 
 void displayEnvironmental() {
+  // 确保正确的字符设置
+  if (!isHourlyEffect) {
+    restoreOriginalChars();
+  }
+  
   lcd.clear();
-  lcd.write(byte(1));
+  lcd.write(byte(1));  // 温度计图标
   lcd.printf(" %.1fC ", environment.getTemperature(TEMP_C));
-  lcd.write(byte(2));
+  lcd.write(byte(2));  // 湿度图标
   lcd.printf(" %d%%", (int)environment.getHumidity());
   
   lcd.setCursor(0, 1);
-  lcd.write(byte(3));
+  lcd.write(byte(3));  // 光照图标
   lcd.printf(" %d lx", (int)environment.getLuminousIntensity());
 }
 
@@ -263,8 +627,6 @@ unsigned long transitionStart = 0;
 const unsigned long TRANSITION_DURATION = 1000;
 int oldColors[3];
 int newColors[3];
-
-// 添加以下新函数
 
 // HSV转RGB颜色转换
 void hsvToRgb(float h, float s, float v, int* r, int* g, int* b) {
@@ -302,7 +664,80 @@ bool checkHoliday(int& index) {
   }
   return false;
 }
-
+// New function to handle advanced hourly effects
+void handleAdvancedHourlyEffect() {
+    unsigned long currentMillis = millis();
+    
+    if (!isHourlyEffect || !currentHourlyEffect) {
+        restoreOriginalChars();
+        return;
+    }
+    
+    unsigned long effectElapsed = currentMillis - hourlyEffectStart;
+    if (effectElapsed >= currentHourlyEffect->duration) {
+        isHourlyEffect = false;
+        restoreOriginalChars();
+        return;
+    }
+    
+    float progress = (float)effectElapsed / currentHourlyEffect->duration;
+    int frame = (int)(progress * 8) % 8;
+    uint8_t tempPattern[8];
+    
+    // 只使用4-7号位置存储特效动画
+    switch(currentHourlyEffect->type) {
+        case 0: // Spiral effect
+            for(int i = 0; i < 4; i++) {
+                memcpy(tempPattern, currentHourlyEffect->patterns[(frame + i) % 8], 8);
+                lcd.customSymbol(i + 4, tempPattern); // 使用4-7号位置
+            }
+            break;
+            
+        case 1: // Pulsing effect
+            for(int i = 0; i < 4; i++) {
+                memcpy(tempPattern, currentHourlyEffect->patterns[(frame + i) % 8], 8);
+                lcd.customSymbol(i + 4, tempPattern); // 使用4-7号位置
+            }
+            break;
+            
+        case 2: // Wave effect
+            for(int i = 0; i < 4; i++) {
+                memcpy(tempPattern, currentHourlyEffect->patterns[(frame + i) % 8], 8);
+                lcd.customSymbol(i + 4, tempPattern); // 使用4-7号位置
+            }
+            break;
+            
+        case 3: // Twinkling effect
+            for(int i = 0; i < 4; i++) {
+                if(random(100) < 20) { // 20% chance to twinkle
+                    memcpy(tempPattern, currentHourlyEffect->patterns[random(8)], 8);
+                    lcd.customSymbol(i + 4, tempPattern); // 使用4-7号位置
+                }
+            }
+            break;
+    }
+    
+    // 移除 lcd.write(byte(0)); 以防止重复显示时钟图标
+    // lcd.write(byte(0));  // 删除这一行
+    
+    lcd.setCursor(2, 0);
+    lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
+    
+    // 在剩余空间显示特效
+    for(int i = 0; i < 4; i++) {
+        lcd.setCursor(12 + (i % 2), i / 2);
+        lcd.write(byte(4 + i));
+    }
+    
+    // 设置特效颜色，确保颜色索引在有效范围内
+    int colorIndex = frame % 8;
+    setColor(
+        currentHourlyEffect->colors[colorIndex][0],
+        currentHourlyEffect->colors[colorIndex][1],
+        currentHourlyEffect->colors[colorIndex][2],
+        0.5 + sin(progress * PI * 2) * 0.5
+    );
+}
 // 处理天气效果
 void handleWeatherEffect(unsigned long currentMillis) {
   float temp = environment.getTemperature(TEMP_C);
@@ -344,127 +779,339 @@ void handleTransition(unsigned long currentMillis) {
   setColor(r, g, b, breatheValue);
 }
 
+// 修改 handleHourlyEffect 函数，避免使用 lcd.clear() 并进一步调整亮度
+void handleHourlyEffect(unsigned long currentMillis) {
+    if (!isHourlyEffect || !currentHourlyEffect) {
+        restoreOriginalChars();
+        return;
+    }
+    
+    unsigned long effectElapsed = currentMillis - hourlyEffectStart;
+    if (effectElapsed >= currentHourlyEffect->duration) {
+        isHourlyEffect = false;
+        restoreOriginalChars();
+        return;
+    }
+    
+    // 计算动画进度和帧
+    float progress = (float)effectElapsed / currentHourlyEffect->duration;
+    int frame = (int)(progress * 8) % 8;
+    
+    // 更新动画帧
+    if (currentMillis - lastFrameUpdate >= 100) {
+        lastFrameUpdate = currentMillis;
+        hourlyEffectFrame = (hourlyEffectFrame + 1) % 8; // 修改为8以匹配动画帧数量
+        
+        // 只使用4-7号位置更新特效动画
+        uint8_t tempPattern[8];
+        for (int i = 0; i < 4; i++) {
+            memcpy(tempPattern, currentHourlyEffect->patterns[hourlyEffectFrame % 8], 8);
+            lcd.customSymbol(i + 4, tempPattern);
+        }
+    }
+    
+    // 不清除屏幕，直接覆盖时钟图标和时间
+    lcd.setCursor(0, 0);  // 假设时钟图标在 (0,0)
+    lcd.write(byte(0));    // 时钟图标
+    lcd.setCursor(2, 0);
+    lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
+    
+    // 在剩余空间显示特效
+    for(int i = 0; i < 4; i++) {
+        lcd.setCursor(12 + (i % 2), i / 2);
+        lcd.write(byte(4 + i));
+    }
+    
+    // 设置特效颜色，确保颜色索引在有效范围内，进一步调整强度以防止屏幕过亮
+    int colorIndex = hourlyEffectFrame % 8;
+    float adjustedIntensity = 0.1 + 0.4 * (0.5 + sin(progress * PI * 2) * 0.5); // 调整亮度范围至0.3 - 0.7
+    
+    setColor(
+        currentHourlyEffect->colors[colorIndex][0],
+        currentHourlyEffect->colors[colorIndex][1],
+        currentHourlyEffect->colors[colorIndex][2],
+        adjustedIntensity
+    );
+    
+    // 调试输出，帮助定位问题
+    Serial.printf("EffectElapsed: %lu, Frame: %d, ColorIndex: %d, Intensity: %.2f\n", 
+                  effectElapsed, frame, colorIndex, adjustedIntensity);
+}
+
+// 添加获取当前时间的处理函数
+void handleGetTime() {
+  char timeStr[20];
+  snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d", 
+           rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
+  server.send(200, "text/plain", timeStr);
+}
+
+// 添加保存WiFi设置的处理函数
+void handleSaveWifi() {
+  String ssid = server.arg("ssid");
+  String password = server.arg("password");
+  
+  // 这里可以将WiFi凭据保存到EEPROM或其他存储中
+  // TODO: 实现WiFi凭据的持久化存储
+  
+  server.send(200, "text/plain", "WiFi settings saved");
+}
+
+// 添加WiFi扫描处理函数
+void handleScanWiFi() {
+  int n = WiFi.scanNetworks();
+  String json = "[";
+  for (int i = 0; i < n; ++i) {
+    if (i > 0) json += ",";
+    json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
+
+// 添加WiFi连接处理函数
+void handleConnectWiFi() {
+  String ssid = server.arg("ssid");
+  String password = server.arg("password");
+  
+  // 保存当前的WiFi模式
+  WiFiMode_t currentMode = WiFi.getMode();
+  
+  // 切换到STA模式并尝试连接
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  
+  // 等待连接，最多等待10秒
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    // 连接成功，尝试同步时间
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      // 更新RTC时间
+      rtc.adjustRtc(timeinfo.tm_year + 1900, 
+                    timeinfo.tm_mon + 1,
+                    timeinfo.tm_mday,
+                    timeinfo.tm_wday,
+                    timeinfo.tm_hour,
+                    timeinfo.tm_min,
+                    timeinfo.tm_sec);
+      server.send(200, "text/plain", "Successfully connected and time synced!");
+    } else {
+      server.send(200, "text/plain", "Connected to WiFi but failed to sync time");
+    }
+  } else {
+    server.send(500, "text/plain", "Failed to connect to WiFi");
+  }
+  
+  // 恢复之前的WiFi模式
+  WiFi.mode(currentMode);
+}
+
+// 添加恢复原始字符的函数
+void restoreOriginalChars() {
+    lcd.customSymbol(0, originalChars[0]);
+    lcd.customSymbol(1, originalChars[1]);
+    lcd.customSymbol(2, originalChars[2]);
+    lcd.customSymbol(3, originalChars[3]);
+}
+
 void setup() {
-  Serial.begin(115200);
-  
-  lcd.init();
-  lcd.clear();
-  
-  lcd.customSymbol(0, clockChar);
-  lcd.customSymbol(1, thermometer);
-  lcd.customSymbol(2, humidityChar);
-  lcd.customSymbol(3, lightChar);
-  
-  rtc.setup();
-  //rtc.adjustRtc(2024,10,24,4,14,28,10);
-  
-  while(environment.begin() != 0) {
+    Serial.begin(115200);
+    
+    lcd.init();
     lcd.clear();
-    lcd.print("Sensor Error!");
-    delay(1000);
-  }
+    
+    // 设置并保存原始字符
+    lcd.customSymbol(0, clockChar);
+    memcpy(originalChars[0], clockChar, 8);
+    
+    lcd.customSymbol(1, thermometer);
+    memcpy(originalChars[1], thermometer, 8);
+    
+    lcd.customSymbol(2, humidityChar);
+    memcpy(originalChars[2], humidityChar, 8);
+    
+    lcd.customSymbol(3, lightChar);
+    memcpy(originalChars[3], lightChar, 8);
+    
+    rtc.setup();
+    //rtc.adjustRtc(2024,10,24,4,14,59,51);
+    
+    while(environment.begin() != 0) {
+        lcd.clear();
+        lcd.print("Sensor Error!");
+        delay(1000);
+    }
+    
+    randomSeed(analogRead(0));
+    colorDuration = random(3000, 10000);
+    
+    rtc.read();
+    updateThemeColors(rtc.hour);
+    for(int i = 0; i < 4; i++) {
+        lcd.customSymbol(4 + i, animationFrames[rtc.week][i]);
+    }
+    // 添加AP模式初始化
+  setupAP();
   
-  randomSeed(analogRead(0));
-  colorDuration = random(3000, 10000);
-  
-  rtc.read();
-  updateThemeColors(rtc.hour);
-  for(int i = 0; i < 4; i++) {
-    lcd.customSymbol(4 + i, animationFrames[rtc.week][i]);
-  }
+  server.on("/time", HTTP_GET, handleGetTime);
+  server.on("/savewifi", HTTP_POST, handleSaveWifi);
+  server.on("/advance-hourly-effect", HTTP_GET, handleAdvancedHourlyEffect);  // 现在可以正确注册
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
+    unsigned long currentMillis = millis();
+    
+    // 处理DNS请求
+  dnsServer.processNextRequest();
   
-  if (currentMillis - lastUpdate >= 10000) {
-    showTimeMode = !showTimeMode;
-    lastUpdate = currentMillis;
+  // 处理Web服务器请求
+  server.handleClient();
+  if (currentMillis - lastSyncAttempt >= SYNC_INTERVAL) {
+    timeNeedSync = true;
+    lastSyncAttempt = currentMillis;
   }
   
-  if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
-    lastEnvUpdate = currentMillis;
-    rtc.read();
+  if (timeNeedSync) {
+    if (syncTimeFromNTP()) {
+      timeNeedSync = false;
+    }
+  }
+
+    if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
+        lastEnvUpdate = currentMillis;
+        rtc.read();
+        
+        // 检查是否是节日
+        int holidayIndex;
+        if(checkHoliday(holidayIndex)) {
+            inSpecialEffect = true;
+            specialEffectStart = currentMillis;
+            memcpy(currentThemeColors, HOLIDAYS[holidayIndex].colors, sizeof(HOLIDAYS[holidayIndex].colors));
+            numThemeColors = 5;
+        } else {
+            updateThemeColors(rtc.hour);
+            numThemeColors = 4;
+        }
+        
+        // 检查温度变化触发天气效果
+        float temp = environment.getTemperature(TEMP_C);
+        if(abs(temp - lastTemp) > 2.0) {
+            isWeatherEffect = true;
+            weatherEffectStart = currentMillis;
+        }
+        lastTemp = temp;
+        
+        adjustBrightness();
+        
+        // 新的显示逻辑
+        if (!showTimeMode) {
+            // 如果当前是环境显示模式，检查是否需要切回时间显示
+            if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
+                showTimeMode = true;
+                forceTimeDisplay = true;  // 强制显示时间一段时间
+            }
+            displayEnvironmental();
+        } else {
+            // 在时间显示模式下，随机决定是否切换到环境显示
+            if (!forceTimeDisplay && random(100) < ENV_DISPLAY_PROBABILITY * 100) {
+                showTimeMode = false;
+                envDisplayStartTime = currentMillis;
+                displayEnvironmental();
+            } else {
+                displayTime();
+            }
+        }
+        
+        // 控制强制时间显示的持续时间
+        if (forceTimeDisplay && currentMillis - envDisplayStartTime >= 10000) {
+            forceTimeDisplay = false;
+        }
+    }
     
-    // 检查是否是节日
-    int holidayIndex;
-    if(checkHoliday(holidayIndex)) {
-      inSpecialEffect = true;
-      specialEffectStart = currentMillis;
-      memcpy(currentThemeColors, HOLIDAYS[holidayIndex].colors, sizeof(HOLIDAYS[holidayIndex].colors));
-      numThemeColors = 5;
+    // 处理各种特效
+    if (inSpecialEffect) {
+        handleSpecialEffect(currentMillis);
+        return;
+    }
+    
+    if (isWeatherEffect) {
+        if (currentMillis - weatherEffectStart > WEATHER_EFFECT_DURATION) {
+            isWeatherEffect = false;
+        } else {
+            handleWeatherEffect(currentMillis);
+            return;
+        }
+    }
+    
+    if (isTransitioning) {
+        handleTransition(currentMillis);
+        return;
+    }
+    
+    // 检测整点特效
+    if (rtc.minute == 0 && rtc.second == 0 && !isHourlyEffect) {
+        isHourlyEffect = true;
+        hourlyEffectStart = currentMillis;
+        hourlyEffectFrame = 0;
+        
+        // 根据当前时间选择适当的整点效果
+        int hour = rtc.hour;
+        if (hour >= 6 && hour < 11) {
+            currentHourlyEffect = &MORNING_EFFECT;
+        } else if (hour >= 11 && hour < 17) {
+            currentHourlyEffect = &DAY_EFFECT;
+        } else if (hour >= 17 && hour < 20) {
+            currentHourlyEffect = &EVENING_EFFECT;
+        } else {
+            currentHourlyEffect = &NIGHT_EFFECT;
+        }
+    }
+    
+    // 处理整点特效
+    if (isHourlyEffect) {
+        handleHourlyEffect(currentMillis);
+        return;
+    }
+    
+    // 颜色切换和呼吸效果的处理保持不变
+    if (currentMillis - lastColorChange >= colorDuration) {
+        memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
+        currentColor = (currentColor + 1) % numThemeColors;
+        memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
+        
+        isTransitioning = true;
+        transitionStart = currentMillis;
+        lastColorChange = currentMillis;
+        colorDuration = random(3000, 10000);
+    }
+    
+    float breatheSpeed = 0.0005;
+    if (breatheIncreasing) {
+        breatheValue += breatheSpeed;
+        if (breatheValue >= 1.0) {
+            breatheValue = 1.0;
+            breatheIncreasing = false;
+        }
     } else {
-      updateThemeColors(rtc.hour);
-      numThemeColors = 4;
+        breatheValue -= breatheSpeed;
+        if (breatheValue <= 0.3) {
+            breatheValue = 0.3;
+            breatheIncreasing = true;
+        }
     }
     
-    // 检查温度变化触发天气效果
-    float temp = environment.getTemperature(TEMP_C);
-    if(abs(temp - lastTemp) > 2.0) { // 温度变化超过2度
-      isWeatherEffect = true;
-      weatherEffectStart = currentMillis;
-    }
-    lastTemp = temp;
-    
-    adjustBrightness();
-    
-    if (showTimeMode) {
-      displayTime();
-    } else {
-      displayEnvironmental();
-    }
-  }
-  
-  // 处理各种特效
-  if (inSpecialEffect) {
-    handleSpecialEffect(currentMillis);
-    return;
-  }
-  
-  if (isWeatherEffect) {
-    if (currentMillis - weatherEffectStart > WEATHER_EFFECT_DURATION) {
-      isWeatherEffect = false;
-    } else {
-      handleWeatherEffect(currentMillis);
-      return;
-    }
-  }
-  
-  if (isTransitioning) {
-    handleTransition(currentMillis);
-    return;
-  }
-  
-  // 颜色切换时启动转场效果
-  if (currentMillis - lastColorChange >= colorDuration) {
-    memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
-    currentColor = (currentColor + 1) % numThemeColors;
-    memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
-    
-    isTransitioning = true;
-    transitionStart = currentMillis;
-    lastColorChange = currentMillis;
-    colorDuration = random(3000, 10000);
-  }
-  float breatheSpeed = 0.0005;
-  if (breatheIncreasing) {
-    breatheValue += breatheSpeed;
-    if (breatheValue >= 1.0) {
-      breatheValue = 1.0;
-      breatheIncreasing = false;
-    }
-  } else {
-    breatheValue -= breatheSpeed;
-    if (breatheValue <= 0.3) {
-      breatheValue = 0.3;
-      breatheIncreasing = true;
-    }
-  }
-  
-  setColor(
-    currentThemeColors[currentColor][0],
-    currentThemeColors[currentColor][1],
-    currentThemeColors[currentColor][2],
-    breatheValue
-  );
+    setColor(
+        currentThemeColors[currentColor][0],
+        currentThemeColors[currentColor][1],
+        currentThemeColors[currentColor][2],
+        breatheValue
+    );
 }
