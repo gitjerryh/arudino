@@ -426,7 +426,7 @@ void handleRoot() {
   html += "}";
   html += "setInterval(updateTime, 1000);";
   
-  // 同步���间函数
+  // 同步时间函数
   html += "function syncTime() {";
   html += "document.getElementById('status').innerHTML='Syncing...';";
   html += "fetch('/sync').then(r=>r.text()).then(data=>{";
@@ -998,7 +998,7 @@ void loop() {
             numThemeColors = 5;
         } else {
             updateThemeColors(rtc.hour);
-            numThemeColors = 4;
+            numThemeColors = 8;
         }
         
         // 检查温度变化触发天气效果
