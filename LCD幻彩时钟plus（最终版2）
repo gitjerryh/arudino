@@ -15,6 +15,10 @@ IPAddress apIP(192, 168, 4, 1);            // AP模式的IP地址
 DNSServer dnsServer;
 WebServer server(80);
 
+// 添加时间更新相关的全局变量
+unsigned long lastTimeUpdate = 0;
+char cachedTimeStr[20] = "00:00:00";  // 初始化为默认值
+
 // 添加新的全局变量（移到文件前面）
 bool isManualColorControl = false;  // 是否处于手动控制模式
 unsigned long lastColorControlTime = 0;  // 最后一次手动控制的时间
@@ -1092,11 +1096,7 @@ void handleHourlyEffect(unsigned long currentMillis) {
 
 // 添加获取当前时间的处理函数
 void handleGetTime() {
-    static char timeStr[20];
-    rtc.read();
-    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", 
-             rtc.hour, rtc.minute, rtc.second);
-    server.send(200, "text/plain", timeStr);
+    server.send(200, "text/plain", cachedTimeStr);
 }
 
 // 添加保存WiFi设置的处理函数
@@ -1253,6 +1253,14 @@ void setup() {
 
 void loop() {
     unsigned long currentMillis = millis();
+    
+    // 更新缓存的时间字符串
+    if (currentMillis - lastTimeUpdate >= 1000) {  // 每秒更新一次
+        rtc.read();
+        snprintf(cachedTimeStr, sizeof(cachedTimeStr), "%02d:%02d:%02d", 
+                rtc.hour, rtc.minute, rtc.second);
+        lastTimeUpdate = currentMillis;
+    }
     
     // 优先处理 Web 服务器请求
     dnsServer.processNextRequest();
