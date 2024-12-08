@@ -1035,7 +1035,7 @@ void handleTransition(unsigned long currentMillis) {
   setColor(r, g, b, breatheValue);
 }
 
-// 修改 handleHourlyEffect 函数
+// 修改 handleHourlyEffect 函数，提高特效的可见性
 void handleHourlyEffect(unsigned long currentMillis) {
     if (!isHourlyEffect || !currentHourlyEffect) {
         restoreOriginalChars();
@@ -1049,36 +1049,27 @@ void handleHourlyEffect(unsigned long currentMillis) {
         return;
     }
     
-    // 在整点特效期间强制显示时间模式
-    showTimeMode = true;
-    
-    // 清除屏幕以防止内容重叠
-    lcd.clear();
-    
-    float progress = (float)effectElapsed / currentHourlyEffect->duration;
-    int frame = (int)(progress * 8) % 8;
-    
-    if (currentMillis - lastFrameUpdate >= 100) {
+    // 增加动画更新频率
+    if (currentMillis - lastFrameUpdate >= 50) {  // 降低更新间隔到50ms
         lastFrameUpdate = currentMillis;
         hourlyEffectFrame = (hourlyEffectFrame + 1) % 8;
         
         // 更新特效动画字符
-        uint8_t tempPattern[8];
         for (int i = 0; i < 4; i++) {
-            memcpy(tempPattern, currentHourlyEffect->patterns[hourlyEffectFrame % 8], 8);
+            uint8_t tempPattern[8];
+            memcpy(tempPattern, currentHourlyEffect->patterns[(hourlyEffectFrame + i) % 8], 8);
             lcd.customSymbol(i + 4, tempPattern);
         }
     }
     
-    // 显示时钟图标和时间
+    // 清屏并重新显示内容
+    lcd.clear();
+    
+    // 显示时间（保持基本显示）
     lcd.setCursor(0, 0);
-    lcd.write(byte(0));
+    lcd.write(byte(0));  // 时钟图标
     lcd.setCursor(2, 0);
     lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
-    
-    // 显示日期和星期（在第二行）
-    lcd.setCursor(0, 1);
-    lcd.printf("%s %02d %s", monthNames[rtc.month-1], rtc.day, dayNames[rtc.week]);
     
     // 在右侧显示特效动画
     for(int i = 0; i < 4; i++) {
@@ -1086,15 +1077,16 @@ void handleHourlyEffect(unsigned long currentMillis) {
         lcd.write(byte(4 + i));
     }
     
-    // 设置特效颜色
+    // 增强特效颜色变化
+    float progress = (float)effectElapsed / currentHourlyEffect->duration;
     int colorIndex = hourlyEffectFrame % 8;
-    float adjustedIntensity = 0.3 + 0.4 * (0.5 + sin(progress * PI * 2) * 0.5);
+    float intensity = 0.5 + 0.5 * sin(progress * PI * 4);  // 加快颜色变化
     
     setColor(
         currentHourlyEffect->colors[colorIndex][0],
         currentHourlyEffect->colors[colorIndex][1],
         currentHourlyEffect->colors[colorIndex][2],
-        adjustedIntensity
+        intensity
     );
 }
 
@@ -1367,10 +1359,13 @@ void loop() {
         } else if (isHourlyEffect) {
             handleHourlyEffect(currentMillis);
         } else {
-            // 检查是否需要触发整点特效
-            if (rtc.minute == 0 && rtc.second == 0 && !isHourlyEffect) {
+            // 修改整点特效的触发检查逻辑
+            static bool hourlyEffectTriggered = false;
+            if (rtc.minute == 0 && rtc.second < 2 && !hourlyEffectTriggered) {
                 isHourlyEffect = true;
                 hourlyEffectStart = currentMillis;
+                hourlyEffectTriggered = true;
+                hourlyEffectFrame = 0;  // 重置特效帧
                 
                 // 根据当前小时选择对应的整点特效
                 if (rtc.hour >= 6 && rtc.hour < 12) {
@@ -1382,6 +1377,15 @@ void loop() {
                 } else {
                     currentHourlyEffect = &NIGHT_EFFECT;
                 }
+                
+                // 由于无法直接获取当前自定义字符，我们只需确保在特效结束时恢复原始字符
+                memcpy(originalChars[0], clockChar, 8);
+                memcpy(originalChars[1], thermometer, 8);
+                memcpy(originalChars[2], humidityChar, 8);
+                memcpy(originalChars[3], lightChar, 8);
+                
+            } else if (rtc.minute != 0) {
+                hourlyEffectTriggered = false;  // 重置触发标志
             }
             
             // 正常的颜色渐变和呼吸效果
