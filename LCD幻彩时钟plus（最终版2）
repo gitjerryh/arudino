@@ -1200,6 +1200,9 @@ void handleSetColor() {
     server.send(200, "application/json", "{\"status\":\"success\"}");
 }
 
+// 在全局变量区域添加
+int lastHour = -1;  // 用于追踪上一次更新主题的小时
+
 void setup() {
     Serial.begin(115200);
     
@@ -1220,7 +1223,7 @@ void setup() {
     memcpy(originalChars[3], lightChar, 8);
     
     rtc.setup();
-  rtc.adjustRtc(2024,10,24,4,14,59,51);
+  //rtc.adjustRtc(2024,10,24,4,14,59,51);
     
     while(environment.begin() != 0) {
         lcd.clear();
@@ -1232,7 +1235,7 @@ void setup() {
     forceTimeDisplay = false;
     
     randomSeed(analogRead(0));
-    colorDuration = random(3000, 10000);
+    colorDuration = random(1000, 10000);
     
     rtc.read();
     updateThemeColors(rtc.hour);
@@ -1274,6 +1277,22 @@ void loop() {
     if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
         lastEnvUpdate = currentMillis;
         rtc.read();
+        
+        // 添加主题颜色更新检查
+        if (rtc.hour != lastHour) {
+            updateThemeColors(rtc.hour);
+            lastHour = rtc.hour;
+            
+            // 如果不在手动控制模式，立即开始向新主题颜色过渡
+            if (!isManualColorControl) {
+                memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
+                currentColor = 0;  // 重置为新主题的第一个颜色
+                memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
+                isTransitioning = true;
+                transitionStart = currentMillis;
+                lastColorChange = currentMillis;
+            }
+        }
         
         // 只在非整点特效时处理显示逻辑
         if (!isHourlyEffect) {
