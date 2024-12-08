@@ -39,9 +39,17 @@ int pendingColors[3] = {0, 0, 0};
 // 修改全局变量区域的呼吸效果相关常量
 const float BREATHE_MIN = 0.15;  // 最小亮度
 const float BREATHE_MAX = 1.0;   // 最大亮度
-const float BREATHE_SPEED_NORMAL = 0.002;  // 正常呼吸速度
-const float BREATHE_SPEED_SLOW = 0.001;    // 慢速呼吸速度
+const float BREATHE_SPEED_NORMAL = 0.001;  // 降低正常呼吸速度
+const float BREATHE_SPEED_SLOW = 0.0005;   // 降低慢速呼吸速度
 float currentBreatheSpeed = BREATHE_SPEED_NORMAL;
+
+// 添加新的呼吸效果相关变量
+float breathePhase = 0.0;        // 呼吸相位
+float breatheVariation = 1.0;    // 呼吸变化率
+const float VARIATION_MIN = 0.8; // 最小变化率
+const float VARIATION_MAX = 1.2; // 最大变化率
+unsigned long lastVariationChange = 0;
+const unsigned long VARIATION_INTERVAL = 3000; // 变化间隔
 
 // 函数声明
 void handleRoot();
