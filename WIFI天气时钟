@@ -1,0 +1,394 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <SPIFFS.h>
+#include "weatherpicture.h"
+#include <U8g2lib.h>
+#include <WebServer.h>
+
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+
+// OLED初始化
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, SCL, SDA, U8X8_PIN_NONE);
+
+// 网络时间配置
+const char *ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 8 * 3600;
+const int daylightOffset_sec = 0;
+
+// 配置参数
+String cityName = "guangzhou"; // 默认城市
+String apiKey = "SBsr6-grugCYr1GgQ"; // API密钥
+
+// Web服务器，端口80
+WebServer server(80);
+
+// 函数声明
+void setupSpiffs();
+void setupWiFiManager();
+void handleRoot();
+void handleSave();
+void ParserJson();
+void OLEDDisplay(String cityName, String weather, String temperature, int code_int);
+void printLocalTime();
+void displayAdvice(String cityName, String advice);
+// 根据天气和温度生成建议
+String getWeatherAdvice(String weather, int temperature) {
+    String advice;
+    
+    // 精简温度建议文本
+    if (temperature <= 0) {
+        advice = "天气寒冷 出门要做好保暖工作哦";
+    } else if (temperature < 10) {
+        advice = "天气转凉 建议着厚外套";
+    } else if (temperature < 20) {
+        advice = "温度适宜 适合户外";
+    } else if (temperature < 28) {
+        advice = "天气宜人 好心情";
+    } else if (temperature < 35) {
+        advice = "天热热 记得防晒补水哦";
+    } else {
+        advice = "高温天气,记得防暑";
+    }
+
+    // 根据天气状况补充建议
+    if (weather.indexOf("雨") != -1) {
+        advice += ",出门带伞";
+    } else if (weather.indexOf("雾") != -1) {
+        advice += ",出行注意安全";
+    } else if (weather.indexOf("晴") != -1) {
+        advice += ",防晒很重要";
+    } else if (weather.indexOf("雪") != -1) {
+        advice += ",注意保暖";
+    }
+
+    return advice;
+}
+
+
+
+// 配置页面HTML
+const char* configPage = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <title>天气站配置</title>
+    <style>
+        body { font-family: Arial; padding: 20px; max-width: 600px; margin: 0 auto; }
+        input { width: 100%; padding: 5px; margin: 5px 0; }
+        button { background: #0078D7; color: white; border: none; padding: 10px; width: 100%; }
+    </style>
+</head>
+<body>
+    <h2>天气站配置</h2>
+    <form action='/save' method='post'>
+        <p>城市名称：<input type='text' name='city' value='%CITY%'></p>
+        <p>API密钥：<input type='text' name='apikey' value='%APIKEY%'></p>
+        <button type='submit'>保存配置</button>
+    </form>
+    <p><button onclick='location.href="/wifi"'>配置WiFi连接</button></p>
+</body>
+</html>
+)";
+
+void setupSpiffs() {
+    if (!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS挂载失败");
+        return;
+    }
+
+    // 读取保存的配置
+    if (SPIFFS.exists("/config.json")) {
+        File configFile = SPIFFS.open("/config.json", "r");
+        if (configFile) {
+            StaticJsonDocument<200> doc;
+            DeserializationError error = deserializeJson(doc, configFile);
+            if (!error) {
+                cityName = doc["city"].as<String>();
+                apiKey = doc["apikey"].as<String>();
+            }
+            configFile.close();
+        }
+    }
+}
+
+void setupWiFiManager() {
+    WiFiManager wm;
+    
+    // 自定义AP
+    wm.setConfigPortalTimeout(180); // 3分钟超时
+    wm.autoConnect("WeatherStation-AP", "12345678");
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("WiFi连接成功");
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+        u8g2.setCursor(0,16);
+        u8g2.print("WiFi连接成功");
+        u8g2.sendBuffer();
+    }
+}
+
+void handleRoot() {
+    String html = String(configPage);
+    html.replace("%CITY%", cityName);
+    html.replace("%APIKEY%", apiKey);
+    server.send(200, "text/html", html);
+}
+
+void handleSave() {
+    if (server.method() == HTTP_POST) {
+        String newCity = server.arg("city");
+        String newApiKey = server.arg("apikey");
+        
+        // 保存到SPIFFS
+        StaticJsonDocument<200> doc;
+        doc["city"] = newCity;
+        doc["apikey"] = newApiKey;
+        
+        File configFile = SPIFFS.open("/config.json", "w");
+        if (configFile) {
+            serializeJson(doc, configFile);
+            configFile.close();
+            
+            cityName = newCity;
+            apiKey = newApiKey;
+            
+            server.send(200, "text/html", "保存成功！<br><a href='/'>返回</a>");
+        } else {
+            server.send(500, "text/html", "保存失败！<br><a href='/'>返回</a>");
+        }
+    }
+}
+
+void ParserJson() {
+    String url = "https://api.seniverse.com/v3/weather/now.json?key=" + apiKey + 
+                 "&location=" + cityName + "&language=zh-Hans&unit=c";
+    
+    HTTPClient http;
+    http.begin(url);
+    int httpCode = http.GET();
+    
+    if (httpCode > 0) {
+        String payload = http.getString();
+        StaticJsonDocument<1024> doc;
+        DeserializationError error = deserializeJson(doc, payload);
+        
+        if (!error) {
+            JsonObject obj1 = doc["results"][0];
+            String displayCity = obj1["location"]["name"].as<String>();
+            String weather = obj1["now"]["text"].as<String>();
+            String temperature = obj1["now"]["temperature"].as<String>();
+            int code_int = obj1["now"]["code"].as<int>();
+            
+            // 随机决定是否显示建议（20%的概率）
+            if (random(100) < 20) {
+                String advice = getWeatherAdvice(weather, temperature.toInt());
+                displayAdvice(displayCity, advice);
+                delay(5000);  // 显示建议5秒
+            }
+            
+            // 显示常规天气信息
+            OLEDDisplay(displayCity, weather, temperature, code_int);
+        }
+    }
+    http.end();
+}
+
+// 屏幕绘制信息
+void OLEDDisplay(String cityName, String weather, String temperature, int code_int){
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+    u8g2.setFontDirection(0);
+    u8g2.clearBuffer();
+    u8g2.setCursor(65, 10);
+    u8g2.print("城市: ");
+    u8g2.print(cityName);
+    u8g2.setCursor(65, 25);
+    u8g2.print("天气: ");
+    u8g2.print(weather);
+    u8g2.setCursor(65, 40);
+    u8g2.print("温度: ");
+    u8g2.print(temperature);
+    u8g2.print("℃");
+
+    // 天气图标显示
+    switch (code_int){
+        case 0: u8g2.drawXBMP(3, 3, sunny_x, sunny_y, sunny); break;
+        case 1: u8g2.drawXBMP(3, 3, clear_x, clear_y, clear); break;
+        case 4: u8g2.drawXBMP(3, 3, cloudy_x, cloudy_y, cloudy); break;
+        case 5: u8g2.drawXBMP(3, 3, PartlyCloudy_x, PartlyCloudy_y, PartlyCloudy); break;
+        case 6: u8g2.drawXBMP(3, 3, MostlyCloudy_x, MostlyCloudy_y, MostlyCloudy); break;
+        case 9: u8g2.drawXBMP(3, 3, Overcast_x, Overcast_y, Overcast); break;
+        case 10: u8g2.drawXBMP(3, 3, Shower_x, Shower_y, Shower); break;
+        case 11: u8g2.drawXBMP(3, 3, Thundershower_x, Thundershower_y, Thundershower); break;
+        case 12: u8g2.drawXBMP(3, 3, ThundershowerWithHail_x, ThundershowerWithHail_y, ThundershowerWithHail); break;
+        case 13: u8g2.drawXBMP(3, 3, Rain_x, Rain_y, Rain); break;
+        case 19: u8g2.drawXBMP(3, 3, IceRain_x, IceRain_y, IceRain); break;
+        case 20: u8g2.drawXBMP(3, 3, Sleet_x, Sleet_y, Sleet); break;
+        case 21: u8g2.drawXBMP(3, 3, SnowFlurry_x, SnowFlurry_y, SnowFlurry); break;
+        case 22: u8g2.drawXBMP(3, 3, Snow_x, Snow_y, Snow); break;
+        case 26: u8g2.drawXBMP(3, 3, Dust_x, Dust_y, Dust); break;
+        case 28: u8g2.drawXBMP(3, 3, Duststorm_x, Duststorm_y, Duststorm); break;
+        case 30: u8g2.drawXBMP(3, 3, Foggy_x, Foggy_y, Foggy); break;
+        case 31: u8g2.drawXBMP(3, 3, Haze_x, Haze_y, Haze); break;
+        case 32: u8g2.drawXBMP(3, 3, Windy_x, Windy_y, Windy); break;
+        case 34: u8g2.drawXBMP(3, 3, Hurricane_x, Hurricane_y, Hurricane); break;
+        case 36: u8g2.drawXBMP(3, 3, Tornado_x, Tornado_y, Tornado); break;
+        case 37: u8g2.drawXBMP(3, 3, Cold_x, Cold_y, Cold); break;
+        case 38: u8g2.drawXBMP(3, 3, Hot_x, Hot_y, Hot); break;
+        case 99: u8g2.drawXBMP(3, 3, Unknown_x, Unknown_y, Unknown); break;
+    }
+
+    // 时间显示
+    printLocalTime();
+    u8g2.sendBuffer();
+}
+
+// 时间获取
+void printLocalTime(){
+    struct tm timeinfo;
+    int retry = 0;
+    const int retry_count = 10;
+    while(!getLocalTime(&timeinfo) && retry < retry_count) {
+        Serial.println("Failed to obtain time, retrying...");
+        delay(1000);
+        retry++;
+    }
+    if (retry >= retry_count) {
+        Serial.println("Failed to obtain time after multiple retries");
+        u8g2.setCursor(0,60);
+        u8g2.print("未获取到时间请重置");
+        return;
+    }
+    Serial.println(&timeinfo, "%F %T %A"); // 格式化输出,串口显示
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+    u8g2.setCursor(30, 64);
+    u8g2.print(&timeinfo, "%F");  // 日期
+    u8g2.setCursor(65, 52);
+    u8g2.print(&timeinfo, "%A");  // 星期
+    u8g2.setCursor(95, 64); 
+    u8g2.print(&timeinfo, "%R"); // 小时-分钟
+}
+// 文字自动换行显示函数
+void drawWrappedText(String text, int x, int y, int maxWidth) {
+    String currentLine = "";
+    String words = text;
+    int currentX = x;
+    int lineHeight = 12; // 行高
+    int currentY = y;
+    
+    while (words.length() > 0) {
+        int spaceIndex = words.indexOf(" ");
+        String nextWord;
+        
+        if (spaceIndex == -1) {
+            nextWord = words;
+            words = "";
+        } else {
+            nextWord = words.substring(0, spaceIndex);
+            words = words.substring(spaceIndex + 1);
+        }
+        
+        // 检查是否需要换行
+        int wordWidth = nextWord.length() * 6; // 估算字宽
+        if (currentX + wordWidth > x + maxWidth) {
+            // 需要换行
+            u8g2.setCursor(x, currentY);
+            u8g2.print(currentLine);
+            currentLine = "";
+            currentX = x;
+            currentY += lineHeight;
+        }
+        
+        if (currentLine.length() > 0) {
+            currentLine += " ";
+        }
+        currentLine += nextWord;
+        currentX += wordWidth;
+    }
+    
+    // 打印最后一行
+    if (currentLine.length() > 0) {
+        u8g2.setCursor(x, currentY);
+        u8g2.print(currentLine);
+    }
+}
+
+// 绘制装饰性边框
+void drawDecorativeBorder() {
+    // 绘制四个角的装饰
+    u8g2.drawLine(0, 0, 10, 0);
+    u8g2.drawLine(0, 0, 0, 10);
+    
+    u8g2.drawLine(117, 0, 127, 0);
+    u8g2.drawLine(127, 0, 127, 10);
+    
+    u8g2.drawLine(0, 53, 0, 63);
+    u8g2.drawLine(0, 63, 10, 63);
+    
+    u8g2.drawLine(117, 63, 127, 63);
+    u8g2.drawLine(127, 53, 127, 63);
+}
+void displayAdvice(String cityName, String advice) {
+    u8g2.clearBuffer();
+    
+    // 绘制装饰边框
+    drawDecorativeBorder();
+    
+   // 显示标题 - 使用较小字体
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+    u8g2.setCursor(40, 12);
+    u8g2.print("今日贴心");
+    
+    // 显示城市名称 - 使用更小字体
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+    u8g2.setCursor(2, 24);
+    u8g2.print(cityName);
+    
+    // 显示细分隔线
+    u8g2.drawHLine(2, 26, 124);
+    
+    // 显示建议文本（自动换行）- 使用最小字体
+    u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+    drawWrappedText(advice, 2, 38, 124);
+    
+    u8g2.sendBuffer();
+}
+
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+    
+// 添加随机数种子初始化
+    randomSeed(analogRead(0));
+
+    u8g2.begin();
+    u8g2.enableUTF8Print();
+    
+    setupSpiffs();
+    setupWiFiManager();
+    
+    // 配置Web服务器路由
+    server.on("/", handleRoot);
+    server.on("/save", handleSave);
+    server.begin();
+    
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    printLocalTime();
+}
+
+void loop() {
+    server.handleClient();
+    ParserJson();
+    delay(3000);
+}
