@@ -1,0 +1,98 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include "DFRobot_BNO055.h"
+
+#define MIN_PULSE_WIDTH       650
+#define MAX_PULSE_WIDTH       2350
+#define FREQUENCY             50
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+typedef DFRobot_BNO055_IIC    BNO;
+BNO   bno(&Wire, 0x28);
+
+// 定义舵机引脚
+int hand = 11;
+int wrist = 12;
+int elbow = 13;
+int shoulder = 14;
+int base = 15;
+
+void printLastOperateStatus(BNO::eStatus_t eStatus)
+{
+  switch(eStatus) {
+    case BNO::eStatusOK:    Serial.println("everything ok"); break;
+    case BNO::eStatusErr:   Serial.println("unknow error"); break;
+    case BNO::eStatusErrDeviceNotDetect:    Serial.println("device not detected"); break;
+    case BNO::eStatusErrDeviceReadyTimeOut: Serial.println("device ready time out"); break;
+    case BNO::eStatusErrDeviceStatus:       Serial.println("device internal status error"); break;
+    default: Serial.println("unknow status"); break;
+  }
+}
+
+void setup() 
+{
+  Serial.begin(115200);
+  
+  // 初始化PWM控制器
+  pwm.begin();
+  pwm.setPWMFreq(FREQUENCY);
+  pwm.setPWM(hand, 0, 90);  // 设置夹爪初始位置
+  
+  pinMode(13, INPUT_PULLUP);
+  
+  // 初始化BNO055传感器
+  bno.reset();
+  while(bno.begin() != BNO::eStatusOK) {
+    Serial.println("bno begin failed");
+    printLastOperateStatus(bno.lastOperateStatus);
+    delay(2000);
+  }
+  
+  // 配置BNO055
+  bno.setOprMode(BNO::eOprModeNdof);
+  bno.setAccRange(BNO::eAccRange_4G);
+  bno.setAccBandWidth(BNO::eAccBandWidth_62_5);
+}
+
+void moveMotorWithAcc(int motorOut, float accValue, float minAcc, float maxAcc)
+{
+  int pulse_wide, pulse_width;
+  
+  // 将加速度值映射到舵机范围
+  pulse_wide = map(int(accValue * 100), int(minAcc * 100), int(maxAcc * 100), 
+                   MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
+  pulse_width = int(float(pulse_wide) / 1000000 * FREQUENCY * 4096);
+  
+  pwm.setPWM(motorOut, 0, pulse_width);
+}
+
+void loop() 
+{
+  // 获取加速度数据
+  BNO::sAxisAnalog_t sAccAnalog = bno.getAxis(BNO::eAxisAcc);
+  
+  // 使用加速度数据控制各个关节
+  moveMotorWithAcc(base, sAccAnalog.x, -2.0, 2.0);      // X轴控制底座
+  moveMotorWithAcc(shoulder, sAccAnalog.y, -2.0, 2.0);  // Y轴控制肩部
+  moveMotorWithAcc(elbow, sAccAnalog.z, -2.0, 2.0);     // Z轴控制肘部
+  
+  // 夹爪控制保持不变
+  int pushButton = digitalRead(13);
+  if(pushButton == LOW) {
+    pwm.setPWM(hand, 0, 180);
+    Serial.println("Grab");
+  } else {
+    pwm.setPWM(hand, 0, 90);
+    Serial.println("Release");
+  }
+  
+  // 打印调试信息
+  Serial.print("Acc: X=");
+  Serial.print(sAccAnalog.x);
+  Serial.print(" Y=");
+  Serial.print(sAccAnalog.y);
+  Serial.print(" Z=");
+  Serial.println(sAccAnalog.z);
+  
+  delay(50);  // 添加小延时以确保稳定性
+}
