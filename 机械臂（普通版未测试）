@@ -1,0 +1,159 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include "DFRobot_BNO055.h"
+#include "EMGFilters.h"
+
+#define MIN_PULSE_WIDTH       650
+#define MAX_PULSE_WIDTH       2350
+#define FREQUENCY             50
+#define SensorInputPin A0     // 肌电传感器输入引脚
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+typedef DFRobot_BNO055_IIC    BNO;
+BNO   bno(&Wire, 0x28);
+
+// 定义舵机引脚
+int hand = 11;
+int wrist = 12;
+int elbow = 13;
+int shoulder = 14;
+int base = 15;
+
+// EMG相关变量
+unsigned long threshold = 0;  // 放松状态基准值
+unsigned long EMG_num = 0;    // EMG信号计数
+EMGFilters myFilter;
+SAMPLE_FREQUENCY sampleRate = SAMPLE_FREQ_500HZ;
+NOTCH_FREQUENCY humFreq = NOTCH_FREQ_50HZ;
+
+// 函数声明
+void printLastOperateStatus(BNO::eStatus_t eStatus);
+int getEMGCount(int gforce_envelope);
+
+void setup() 
+{
+  Serial.begin(115200);
+  
+  // 初始化PWM控制器
+  pwm.begin();
+  pwm.setPWMFreq(FREQUENCY);
+  pwm.setPWM(hand, 0, 90);  // 设置夹爪初始位置
+  
+  // 初始化BNO055传感器
+  bno.reset();
+  while(bno.begin() != BNO::eStatusOK) {
+    Serial.println("bno begin failed");
+    printLastOperateStatus(bno.lastOperateStatus);
+    delay(2000);
+  }
+  
+  // 配置BNO055
+  bno.setOprMode(BNO::eOprModeNdof);
+  bno.setAccRange(BNO::eAccRange_4G);
+  bno.setAccBandWidth(BNO::eAccBandWidth_62_5);
+
+  // 初始化EMG滤波器
+  myFilter.init(sampleRate, humFreq, true, true, true);
+}
+
+void moveMotorWithAcc(int motorOut, float accValue, float minAcc, float maxAcc)
+{
+  int pulse_wide, pulse_width;
+  pulse_wide = map(int(accValue * 100), int(minAcc * 100), int(maxAcc * 100), 
+                   MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
+  pulse_width = int(float(pulse_wide) / 1000000 * FREQUENCY * 4096);
+  pwm.setPWM(motorOut, 0, pulse_width);
+}
+
+void controlGripper(bool shouldGrip) 
+{
+  if(shouldGrip) {
+    pwm.setPWM(hand, 0, 180);  // 夹紧
+    Serial.println("Grip detected - Closing gripper");
+  } else {
+    pwm.setPWM(hand, 0, 90);   // 松开
+    Serial.println("Relaxed - Opening gripper");
+  }
+}
+
+void loop() 
+{
+  // 获取加速度数据控制机械臂位置
+  BNO::sAxisAnalog_t sAccAnalog = bno.getAxis(BNO::eAxisAcc);
+  moveMotorWithAcc(base, sAccAnalog.x, -2.0, 2.0);      
+  moveMotorWithAcc(shoulder, sAccAnalog.y, -2.0, 2.0);  
+  moveMotorWithAcc(elbow, sAccAnalog.z, -2.0, 2.0);     
+
+  // 处理EMG信号控制夹爪
+  int emgData = analogRead(SensorInputPin);
+  int dataAfterFilter = myFilter.update(emgData);
+  int envelope = sq(dataAfterFilter);
+  envelope = (envelope > threshold) ? envelope : 0;
+
+  if (threshold > 0) {
+    // 正常工作模式：检测握拳动作
+    if (getEMGCount(envelope)) {
+      EMG_num++;
+      controlGripper(true);  // 检测到握拳，夹紧
+    } else {
+      controlGripper(false); // 未检测到握拳，松开
+    }
+  } else {
+    // 校准模式
+    Serial.print("Calibrating EMG - Current value: ");
+    Serial.println(envelope);
+  }
+
+  // 打印调试信息
+  Serial.print("Acc: X=");
+  Serial.print(sAccAnalog.x);
+  Serial.print(" Y=");
+  Serial.print(sAccAnalog.y);
+  Serial.print(" Z=");
+  Serial.println(sAccAnalog.z);
+  
+  delayMicroseconds(500);  // 保持采样频率
+}
+
+// EMG信号检测函数
+int getEMGCount(int gforce_envelope)
+{
+  static long integralData = 0;
+  static long integralDataEve = 0;
+  static bool remainFlag = false;
+  static unsigned long timeMillis = 0;
+  static unsigned long timeBeginzero = 0;
+  static int TimeStandard = 200;
+
+  integralDataEve = integralData;
+  integralData += gforce_envelope;
+
+  if ((integralDataEve == integralData) && (integralDataEve != 0)) {
+    timeMillis = millis();
+    if (remainFlag) {
+      timeBeginzero = timeMillis;
+      remainFlag = false;
+      return 0;
+    }
+    if ((timeMillis - timeBeginzero) > TimeStandard) {
+      integralDataEve = integralData = 0;
+      return 1;
+    }
+    return 0;
+  } else {
+    remainFlag = true;
+    return 0;
+  }
+}
+
+void printLastOperateStatus(BNO::eStatus_t eStatus)
+{
+  switch(eStatus) {
+    case BNO::eStatusOK:    Serial.println("everything ok"); break;
+    case BNO::eStatusErr:   Serial.println("unknow error"); break;
+    case BNO::eStatusErrDeviceNotDetect:    Serial.println("device not detected"); break;
+    case BNO::eStatusErrDeviceReadyTimeOut: Serial.println("device ready time out"); break;
+    case BNO::eStatusErrDeviceStatus:       Serial.println("device internal status error"); break;
+    default: Serial.println("unknow status"); break;
+  }
+}
