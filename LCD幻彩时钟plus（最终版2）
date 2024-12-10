@@ -41,7 +41,7 @@ bool colorNeedsUpdate = false;
 int pendingColors[3] = {0, 0, 0};
 
 // 修改全局变量区域的呼吸效果相关常量
-const float BREATHE_MIN = 0.15;  // 最小亮度
+const float BREATHE_MIN = 0.2;  // 最小亮度
 const float BREATHE_MAX = 1.0;   // 最大亮度
 const float BREATHE_SPEED_NORMAL = 0.001;  // 降低正常呼吸速度
 const float BREATHE_SPEED_SLOW = 0.0005;   // 降低慢速呼吸速度
@@ -95,7 +95,7 @@ unsigned long specialEffectStart = 0;
 const unsigned long ENV_UPDATE_INTERVAL = 1000;
 bool showTimeMode = true;
 
-const unsigned long ENV_DISPLAY_DURATION = 3000;  // 环境显示持续3秒
+const unsigned long ENV_DISPLAY_DURATION = 15000;  // 环境显示持续3秒
 const float ENV_DISPLAY_PROBABILITY = 0.1;        // 修改为30%的概率切换到环境显示
 unsigned long envDisplayStartTime = 0;            // 环境显示开始时间
 bool forceTimeDisplay = true;                     // 强制时间显示标志
@@ -192,7 +192,7 @@ byte animationFrames[7][4][8] = {
     {B10101,B01110,B11111,B01110,B10101,B00100,B00000,B00100},
     {B01110,B11111,B01110,B10101,B00100,B00000,B00100,B10101}
   },
-  // 星期一 - 月亮动画
+  // 星期一 - 流星雨动画
   {
     {B10000,B01000,B00100,B00010,B00000,B00000,B00000,B00000},
     {B00000,B10000,B01000,B00100,B00010,B00000,B00000,B00000},
@@ -240,6 +240,11 @@ byte animationFrames[7][4][8] = {
 int currentFrame = 0;
 unsigned long lastFrameUpdate = 0;
 const unsigned long FRAME_INTERVAL = 100; // 动画帧更新间隔
+// 添加在全局变量区域
+int scrollPosition = 0;
+unsigned long lastScrollTime = 0;
+const unsigned long SCROLL_INTERVAL = 400; // 滚动间隔时间(ms)
+String envDataString = ""; // 用于存储环境数据的完整字符串
 
 // 添加亮度控制相关的常量
 const int MIN_LIGHT = 0;    // 最小光照强度（lux）
@@ -431,12 +436,12 @@ void setColor(int r, int g, int b, float intensity) {
 
 
 
-// 处理根路径请求
+// 处���根路径请求
 void handleRoot() {
     String html = "<!DOCTYPE html><html><head>";
     html += "<meta charset='UTF-8'>";  // 添加UTF-8编码支持
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-    // 添加Google Fonts支持
+    // 添�����Google Fonts支持
     html += "<link href='https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap' rel='stylesheet'>";
     
     html += "<style>";
@@ -807,62 +812,108 @@ void handleSpecialEffect(unsigned long currentMillis) {
 }
 
 void displayTime() {
-  // 确保正确的字符设置
-  if (!isHourlyEffect) {
-    restoreOriginalChars();
-  }
-  
-  unsigned long currentMillis = millis();
-  
-  if (currentMillis - lastFrameUpdate >= FRAME_INTERVAL) {
-    lastFrameUpdate = currentMillis;
-    currentFrame = (currentFrame + 1) % 4;
-    
-    // 更新动画字符（使用4-7号位置）
-    for(int i = 0; i < 4; i++) {
-      lcd.customSymbol(4 + i, animationFrames[rtc.week][(currentFrame + i) % 4]);
+    // 确保正确的字符设置
+    if (!isHourlyEffect) {
+        restoreOriginalChars();
     }
-  }
-  
-  lcd.clear();
-  lcd.write(byte(0));  // 时钟图标
-  
-  // 显示时间
-  lcd.setCursor(2, 0);
-  lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
-  
-  // 在第一行右侧显示动画
-  lcd.setCursor(12, 0);
-  lcd.write(byte(4));
-  lcd.write(byte(5));
-  
-  // 显示日期和星期
-  lcd.setCursor(0, 1);
-  lcd.printf("%s %02d %s", monthNames[rtc.month-1], rtc.day, dayNames[rtc.week]);
-  
-  // 在第二行右侧显示动画
-  lcd.setCursor(12, 1);
-  lcd.write(byte(6));
-  lcd.write(byte(7));
+    
+    unsigned long currentMillis = millis();
+    
+    if (currentMillis - lastFrameUpdate >= FRAME_INTERVAL) {
+        lastFrameUpdate = currentMillis;
+        currentFrame = (currentFrame + 1) % 4;
+        
+        // 更新动画字符（使用4-7号位置）
+        for(int i = 0; i < 4; i++) {
+            lcd.customSymbol(4 + i, animationFrames[rtc.week][(currentFrame + i) % 4]);
+        }
+    }
+    
+    // 先清屏
+    lcd.clear();
+    
+    // 第一行：时钟图标和时间
+    lcd.setCursor(0, 0);
+    lcd.write(byte(0));  // 时钟图标
+    lcd.setCursor(2, 0);
+    lcd.printf("%02d:%02d:%02d", rtc.hour, rtc.minute, rtc.second);
+    
+    // 第一行右侧动画
+    lcd.setCursor(12, 0);
+    lcd.write(byte(4));
+    lcd.write(byte(5));
+    
+    // 第二行：日期和星期
+    lcd.setCursor(0, 1);
+    // 确保日期和星期的显示
+    if(rtc.month >= 1 && rtc.month <= 12 && rtc.week >= 0 && rtc.week <= 6) {
+        lcd.printf("%s %02d %s", monthNames[rtc.month-1], rtc.day, dayNames[rtc.week]);
+    } else {
+        lcd.print("Date Error!"); // 错误提示
+    }
+    
+    // 第二行右侧动画
+    lcd.setCursor(12, 1);
+    lcd.write(byte(6));
+    lcd.write(byte(7));
 }
 
 void displayEnvironmental() {
-  // 确保正确的字符设置
-  if (!isHourlyEffect) {
-    restoreOriginalChars();
-  }
-  
-  lcd.clear();
-  lcd.write(byte(1));  // 温度计图标
-  lcd.printf(" %.1fC ", environment.getTemperature(TEMP_C));
-  lcd.write(byte(2));  // 湿度图标
-  lcd.printf(" %d%%", (int)environment.getHumidity());
-  
-  lcd.setCursor(0, 1);
-  lcd.write(byte(3));  // 光照图标
-  lcd.printf(" %d lx", (int)environment.getLuminousIntensity());
+    // 确保正确的字符设置
+    if (!isHourlyEffect) {
+        restoreOriginalChars();
+    }
+    
+    // 更新环境数据字符串
+    char tempStr[80];
+    float temp = environment.getTemperature(TEMP_C);
+    int humidity = (int)environment.getHumidity();
+    int light = (int)environment.getLuminousIntensity();
+    
+    // 检查数据有效性
+    if (isnan(temp) || humidity < 0 || humidity > 100 || light < 0) {
+        sprintf(tempStr, "Sensor Error!");
+    } else {
+        sprintf(tempStr, "  \1%.1fC  \2%d%%  \3%d lx  ", temp, humidity, light);
+    }
+    envDataString = String(tempStr);
+    
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastScrollTime >= SCROLL_INTERVAL) {
+        lastScrollTime = currentMillis;
+        scrollPosition++;
+        if (scrollPosition >= envDataString.length()) {
+            scrollPosition = 0;
+        }
+        
+        // 清屏以防止残留
+        lcd.clear();
+        
+        // 准备显示字符串
+        String displayStr = envDataString.substring(scrollPosition);
+        displayStr += envDataString.substring(0, scrollPosition);
+        
+        // 确保在两行都显示
+        for (int row = 0; row < 2; row++) {
+            lcd.setCursor(0, row);
+            String lineStr = displayStr.substring(0, min(16, (int)displayStr.length()));
+            
+            // 逐字符显示，确保特殊字符正确显示
+            for (int i = 0; i < lineStr.length(); i++) {
+                char c = lineStr.charAt(i);
+                if (c == '\1') {
+                    lcd.write(byte(1));  // 温度计图标
+                } else if (c == '\2') {
+                    lcd.write(byte(2));  // 湿度图标
+                } else if (c == '\3') {
+                    lcd.write(byte(3));  // 光照图标
+                } else {
+                    lcd.write(c);
+                }
+            }
+        }
+    }
 }
-
 const struct {
   int month;
   int day;
@@ -1203,13 +1254,140 @@ void handleSetColor() {
 // 在全局变量区域添加
 int lastHour = -1;  // 用于追踪上一次更新主题的小时
 
+// 在全局变量区域添加新的呼吸速度和深度变量
+float breatheSpeed = 0.001;  // 呼吸速度
+float breatheDepth = 0.5;    // 呼吸深度，范围从0.1到1.0
+unsigned long lastBreatheAdjustTime = 0;
+const unsigned long BREATHE_ADJUST_INTERVAL = 5000; // 每5秒调整一次呼吸参数
+
+// 在全局变量区域添加开机动画相关的字符定义
+byte heart[8] = {
+    0b00000,
+    0b01010,
+    0b11111,
+    0b11111,
+    0b11111,
+    0b01110,
+    0b00100,
+    0b00000
+};
+
+byte smiley[8] = {
+    0b00000,
+    0b00000,
+    0b01010,
+    0b00000,
+    0b00000,
+    0b10001,
+    0b01110,
+    0b00000
+};
+
+byte frownie[8] = {
+    0b00000,
+    0b00000,
+    0b01010,
+    0b00000,
+    0b00000,
+    0b00000,
+    0b01110,
+    0b10001
+};
+
+byte armsDown[8] = {
+    0b00100,
+    0b01010,
+    0b00100,
+    0b00100,
+    0b01110,
+    0b10101,
+    0b00100,
+    0b01010
+};
+
+byte armsUp[8] = {
+    0b00100,
+    0b01010,
+    0b00100,
+    0b10101,
+    0b01110,
+    0b00100,
+    0b00100,
+    0b01010
+};
+
+// 添加开机动画函数
+void playBootAnimation() {
+    // 临时保存当前自定义字符
+    byte tempChars[5][8];
+    for(int i = 0; i < 5; i++) {
+        memcpy(tempChars[i], originalChars[i], 8);
+    }
+    
+    // 设置动画字符
+    lcd.customSymbol(0, heart);
+    lcd.customSymbol(1, smiley);
+    lcd.customSymbol(2, frownie);
+    lcd.customSymbol(3, armsDown);
+    lcd.customSymbol(4, armsUp);
+    
+    // 第一阶段：显示欢迎信息
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Welcome to");
+    lcd.setCursor(0, 1);
+    lcd.print("Smart Clock ");
+    lcd.write((unsigned char)1);
+    delay(1000);
+    
+    // 第二阶段：心跳动画
+    for(int i = 0; i < 3; i++) {
+        lcd.clear();
+        lcd.setCursor(7, 0);
+        lcd.write((unsigned char)0);
+        delay(300);
+        lcd.clear();
+        lcd.setCursor(7, 0);
+        lcd.print(" ");
+        delay(200);
+    }
+    
+    // 第三阶段：小人动画
+    lcd.clear();
+    lcd.setCursor(4, 0);
+    lcd.print("Loading...");
+    for(int i = 0; i < 4; i++) {
+        lcd.setCursor(7, 1);
+        lcd.write(3);
+        delay(300);
+        lcd.setCursor(7, 1);
+        lcd.write(4);
+        delay(300);
+    }
+    
+    // 最后阶段：完成动画
+    lcd.clear();
+    lcd.setCursor(3, 0);
+    lcd.print("Ready! ");
+    lcd.write((unsigned char)1);
+    delay(1000);
+    
+    // 恢复原始自定义字符
+    for(int i = 0; i < 5; i++) {
+        lcd.customSymbol(i, tempChars[i]);
+    }
+    
+    lcd.clear();
+}
+
+// 修改 setup 函数，添加开机动画
 void setup() {
     Serial.begin(115200);
     
     lcd.init();
     lcd.clear();
     
-    // 设置并保存原始字符
+    // 保存原始字符
     lcd.customSymbol(0, clockChar);
     memcpy(originalChars[0], clockChar, 8);
     
@@ -1222,8 +1400,11 @@ void setup() {
     lcd.customSymbol(3, lightChar);
     memcpy(originalChars[3], lightChar, 8);
     
+    // 播放开机动画
+    playBootAnimation();
+    
+    // 继续原有的设置
     rtc.setup();
-  //rtc.adjustRtc(2024,10,24,4,14,59,51);
     
     while(environment.begin() != 0) {
         lcd.clear();
@@ -1231,9 +1412,7 @@ void setup() {
         delay(1000);
     }
     
-    // 添加这一行，确保允许概率切换
     forceTimeDisplay = false;
-    
     randomSeed(analogRead(0));
     colorDuration = random(1000, 10000);
     
@@ -1242,13 +1421,13 @@ void setup() {
     for(int i = 0; i < 4; i++) {
         lcd.customSymbol(4 + i, animationFrames[rtc.week][i]);
     }
-    // 添加AP模式初始化
-  setupAP();
-  
-  server.on("/time", HTTP_GET, handleGetTime);
-  server.on("/savewifi", HTTP_POST, handleSaveWifi);
-  server.on("/advance-hourly-effect", HTTP_GET, handleAdvancedHourlyEffect);  // 现在可以正确注册
-  server.on("/set-color", HTTP_POST, handleSetColor);
+    
+    setupAP();
+    
+    server.on("/time", HTTP_GET, handleGetTime);
+    server.on("/savewifi", HTTP_POST, handleSaveWifi);
+    server.on("/advance-hourly-effect", HTTP_GET, handleAdvancedHourlyEffect);
+    server.on("/set-color", HTTP_POST, handleSetColor);
 }
 
 void loop() {
@@ -1308,6 +1487,9 @@ void loop() {
                 if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
                     showTimeMode = false;
                     envDisplayStartTime = currentMillis;
+                    scrollPosition = 0;
+        envDataString = "";
+        lastScrollTime = currentMillis;
                 }
             } else if (!showTimeMode) {
                 if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
@@ -1324,7 +1506,7 @@ void loop() {
                 displayEnvironmental();
             }
         } else {
-            // 如果是整点特效，调用整点特效处理函数
+            // 如���是整点特效，调用整点特效处理函数
             handleHourlyEffect(currentMillis);
         }
         
@@ -1348,7 +1530,7 @@ void loop() {
         transitionStart = currentMillis;
     }
 
-    // 颜色控制逻辑
+    // 颜色���制逻辑
     if (isManualColorControl) {
         // 手动控制模式下只更新颜色，不影响显示内容
         setColor(manualColors[0], manualColors[1], manualColors[2], MANUAL_MODE_BRIGHTNESS);
@@ -1411,13 +1593,16 @@ void loop() {
                 currentBreatheSpeed = random(100) < 30 ? BREATHE_SPEED_SLOW : BREATHE_SPEED_NORMAL;
             }
             
-            // 使用正弦函数实现更平滑的呼吸效果
-            float breatheProgress = (sin(currentMillis * currentBreatheSpeed) + 1.0) / 2.0;
-            breatheValue = BREATHE_MIN + (BREATHE_MAX - BREATHE_MIN) * breatheProgress;
+            // 每隔一段时间随机调整呼吸速度和深度
+            if (currentMillis - lastBreatheAdjustTime > BREATHE_ADJUST_INTERVAL) {
+                lastBreatheAdjustTime = currentMillis;
+                breatheSpeed = random(5, 15) / 10000.0; // 随机呼吸速度，0.0005到0.0015之间
+                breatheDepth = random(5, 10) / 10.0;    // 随机呼吸深度，0.5到1.0之间
+            }
             
-            // 添加随机微小扰动，使呼吸效果更自然
-            float randomFlutter = (random(-10, 10) / 1000.0);
-            breatheValue = constrain(breatheValue + randomFlutter, BREATHE_MIN, BREATHE_MAX);
+            // 计算呼吸效果
+            float breatheProgress = (sin(currentMillis * breatheSpeed) + 1.0) / 2.0; // 使用正弦波生成呼吸效果
+            breatheValue = BREATHE_MIN + (BREATHE_MAX - BREATHE_MIN) * breatheProgress * breatheDepth;
             
             // 应用颜色和呼吸效果
             if (!isManualColorControl) {
