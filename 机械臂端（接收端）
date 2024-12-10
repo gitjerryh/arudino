@@ -1,0 +1,128 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+#define MIN_PULSE_WIDTH       650
+#define MAX_PULSE_WIDTH       2350
+#define FREQUENCY             50
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+// 定义舵机引脚
+int hand = 11;
+int wrist = 12;
+int elbow = 13;
+int shoulder = 14;
+int base = 15;
+
+// 夹爪状态机
+enum GripperState {OPEN, CLOSING, CLOSED};
+GripperState currentState = OPEN;
+
+// 数据接收结构体（必须与发送端完全一致）
+struct ControlData {
+  float yaw;
+  float pitch;
+  float roll;
+  bool shouldGrip;
+};
+
+void setup() {
+  Serial.begin(115200);
+  
+  // 初始化WiFi为站点模式
+  WiFi.mode(WIFI_STA);
+
+  // 打印本机MAC地址（用于配置发送端）
+  Serial.print("MAC Address: ");
+  Serial.println(WiFi.macAddress());
+
+  // 初始化ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // 注册接收回调函数
+  esp_now_register_recv_cb(OnDataRecv);
+
+  // 初始化PWM控制器
+  pwm.begin();
+  pwm.setPWMFreq(FREQUENCY);
+  pwm.setPWM(hand, 0, 90);  // 设置夹爪初始位置
+}
+
+void moveMotorWithEuler(int motorOut, float angle, float minAngle, float maxAngle)
+{
+  int pulse_wide = map(int(angle * 100), int(minAngle * 100), int(maxAngle * 100), 
+                      MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
+  int pulse_width = int(float(pulse_wide) / 1000000 * FREQUENCY * 4096);
+  pwm.setPWM(motorOut, 0, pulse_width);
+}
+
+void controlGripperWithStateMachine(bool shouldGrip) 
+{
+  static unsigned long lastActionTime = 0;
+  unsigned long now = millis();
+  
+  switch(currentState) {
+    case OPEN:
+      if (shouldGrip) {
+        pwm.setPWM(hand, 0, 180);
+        currentState = CLOSING;
+        lastActionTime = now;
+        Serial.println("Grip detected - Closing gripper");
+      }
+      break;
+      
+    case CLOSING:
+      if (now - lastActionTime > 500) {
+        currentState = CLOSED;
+      }
+      break;
+      
+    case CLOSED:
+      if (!shouldGrip) {
+        pwm.setPWM(hand, 0, 90);
+        currentState = OPEN;
+        Serial.println("Relaxed - Opening gripper");
+      }
+      break;
+  }
+}
+
+// ESP-NOW数据接收回调函数
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
+  // 检查数据长度是否正确
+  if (len != sizeof(ControlData)) {
+    Serial.println("Received data size doesn't match!");
+    return;
+  }
+
+  // 转换接收到的数据
+  ControlData *receivedData = (ControlData *)data;
+
+  // 使用接收到的欧拉角控制机械臂
+  moveMotorWithEuler(base, receivedData->yaw, -180.0, 180.0);      
+  moveMotorWithEuler(shoulder, receivedData->pitch, -90.0, 90.0);  
+  moveMotorWithEuler(elbow, receivedData->roll, -90.0, 90.0);     
+
+  // 控制夹爪
+  controlGripperWithStateMachine(receivedData->shouldGrip);
+
+  // 打印调试信息
+  Serial.print("Received - Yaw: ");
+  Serial.print(receivedData->yaw);
+  Serial.print(" Pitch: ");
+  Serial.print(receivedData->pitch);
+  Serial.print(" Roll: ");
+  Serial.print(receivedData->roll);
+  Serial.print(" Grip: ");
+  Serial.println(receivedData->shouldGrip);
+}
+
+void loop() {
+  // 主循环保持空闲，所有控制都在回调函数中进行
+  delay(10);
+}
