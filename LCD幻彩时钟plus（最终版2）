@@ -106,7 +106,7 @@ bool breatheIncreasing = true;
 bool inSpecialEffect = false;
 int specialEffectStep = 0;
 float lastTemp = 0.0;  // 在全局变量区域添加这个变量
-
+unsigned long lastHueUpdate = 0;
 // Custom characters
 byte clockChar[8] = {
   B00000, B01110, B10101, B10111,
@@ -441,7 +441,7 @@ void handleRoot() {
     String html = "<!DOCTYPE html><html><head>";
     html += "<meta charset='UTF-8'>";  // 添加UTF-8编码支持
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-    // 添�����Google Fonts支持
+    // 添�������Google Fonts支持
     html += "<link href='https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap' rel='stylesheet'>";
     
     html += "<style>";
@@ -758,7 +758,7 @@ void setupAP() {
   // 配置Web服务器路由
   server.on("/", HTTP_GET, handleRoot);
   server.on("/sync", HTTP_GET, handleTimeSync);
-  server.on("/scan-wifi", HTTP_GET, handleScanWiFi);  // 新增
+  server.on("/scan-wifi", HTTP_GET, handleScanWiFi);  // 新����
   server.on("/connect-wifi", HTTP_POST, handleConnectWiFi);  // 新增
   server.onNotFound(handleNotFound);
   
@@ -1318,6 +1318,9 @@ byte armsUp[8] = {
 
 // 添加开机动画函数
 void playBootAnimation() {
+    // 设置初始背光颜色为温暖的白色
+    setColor(255, 255, 200, 1.0);
+    
     // 临时保存当前自定义字符
     byte tempChars[5][8];
     for(int i = 0; i < 5; i++) {
@@ -1331,7 +1334,8 @@ void playBootAnimation() {
     lcd.customSymbol(3, armsDown);
     lcd.customSymbol(4, armsUp);
     
-    // 第一阶段：显示欢迎信息
+    // 第一阶段：显示欢迎信息（淡蓝色）
+    setColor(100, 200, 255, 1.0);
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Welcome to");
@@ -1340,23 +1344,33 @@ void playBootAnimation() {
     lcd.write((unsigned char)1);
     delay(1000);
     
-    // 第二阶段：心跳动画
+    // 第二阶段：心跳动画（粉红色）
+    setColor(255, 100, 100, 1.0);
     for(int i = 0; i < 3; i++) {
         lcd.clear();
         lcd.setCursor(7, 0);
         lcd.write((unsigned char)0);
+        setColor(255, 50, 50, 1.0);
         delay(300);
         lcd.clear();
         lcd.setCursor(7, 0);
         lcd.print(" ");
+        setColor(255, 150, 150, 1.0);
         delay(200);
     }
     
-    // 第三阶段：小人动画
+    // 第三阶段：小人动画（渐变色）
     lcd.clear();
     lcd.setCursor(4, 0);
     lcd.print("Loading...");
     for(int i = 0; i < 4; i++) {
+        float progress = i / 4.0;
+        setColor(
+            100 + progress * 155,  // 从淡蓝到白色渐变
+            200,
+            255 - progress * 55,
+            1.0
+        );
         lcd.setCursor(7, 1);
         lcd.write(3);
         delay(300);
@@ -1365,7 +1379,8 @@ void playBootAnimation() {
         delay(300);
     }
     
-    // 最后阶段：完成动画
+    // 最后阶段：完成动画（明亮的白色）
+    setColor(255, 255, 255, 1.0);
     lcd.clear();
     lcd.setCursor(3, 0);
     lcd.print("Ready! ");
@@ -1377,10 +1392,27 @@ void playBootAnimation() {
         lcd.customSymbol(i, tempChars[i]);
     }
     
+    // 在清屏之前，确保设置一个过渡颜色
+    setColor(currentThemeColors[0][0], 
+            currentThemeColors[0][1], 
+            currentThemeColors[0][2], 
+            1.0);
+            
     lcd.clear();
+    
+    // 初始化颜色相关变量，确保平滑过渡到正常显示
+    breatheValue = 1.0;
+    currentBrightness = 1.0;
+    lastColorChange = millis();
+    lastColorUpdate = millis();
+    lastBreatheAdjustTime = millis();
+    lastHueUpdate = millis();
+    
+    // 强制更新显示
+    displayTime();
 }
 
-// 修改 setup 函数，添加开机动画
+// 修改 setup 函数
 void setup() {
     Serial.begin(115200);
     
@@ -1400,34 +1432,79 @@ void setup() {
     lcd.customSymbol(3, lightChar);
     memcpy(originalChars[3], lightChar, 8);
     
-    // 播放开机动画
-    playBootAnimation();
-    
-    // 继续原有的设置
+    // 初始化RTC和环境传感器
     rtc.setup();
+    rtc.read();
+    updateThemeColors(rtc.hour);  // 确保在播放动画前更新主题颜色
     
     while(environment.begin() != 0) {
+        setColor(255, 50, 50, 1.0);  // 错误状态显示红色
         lcd.clear();
         lcd.print("Sensor Error!");
         delay(1000);
     }
     
+    // 初始化其他变量
     forceTimeDisplay = false;
     randomSeed(analogRead(0));
     colorDuration = random(1000, 10000);
     
-    rtc.read();
-    updateThemeColors(rtc.hour);
+    // 设置动画帧
     for(int i = 0; i < 4; i++) {
         lcd.customSymbol(4 + i, animationFrames[rtc.week][i]);
     }
     
+    // 播放开机动画
+    playBootAnimation();
+    
+    // 设置网络
     setupAP();
     
+    // 配置服务器路由
     server.on("/time", HTTP_GET, handleGetTime);
     server.on("/savewifi", HTTP_POST, handleSaveWifi);
     server.on("/advance-hourly-effect", HTTP_GET, handleAdvancedHourlyEffect);
     server.on("/set-color", HTTP_POST, handleSetColor);
+    
+    // 确保所有时间戳都被正确初始化
+    lastUpdate = millis();
+    lastEnvUpdate = millis();
+    lastWebUpdate = millis();
+    lastTimeUpdate = millis();
+}
+
+// 添加新的全局变量用于流光渐变
+float currentHue = 0.0;         // 当前色相值 (0-360)
+float hueSpeed = 0.5;          // 色相变化速度
+float saturation = 1.0;        // 饱和度
+float value = 1.0;             // 明度
+
+const unsigned long HUE_UPDATE_INTERVAL = 20; // 每20ms更新一次色相
+
+// 在全局变量区域添加HSV转RGB的函数
+void hsvToRgb(float h, float s, float v, int& r, int& g, int& b) {
+    float c = v * s;
+    float x = c * (1 - abs(fmod(h / 60.0, 2) - 1));
+    float m = v - c;
+    
+    float rf, gf, bf;
+    if(h >= 0 && h < 60) {
+        rf = c; gf = x; bf = 0;
+    } else if(h >= 60 && h < 120) {
+        rf = x; gf = c; bf = 0;
+    } else if(h >= 120 && h < 180) {
+        rf = 0; gf = c; bf = x;
+    } else if(h >= 180 && h < 240) {
+        rf = 0; gf = x; bf = c;
+    } else if(h >= 240 && h < 300) {
+        rf = x; gf = 0; bf = c;
+    } else {
+        rf = c; gf = 0; bf = x;
+    }
+    
+    r = (rf + m) * 255;
+    g = (gf + m) * 255;
+    b = (bf + m) * 255;
 }
 
 void loop() {
@@ -1549,69 +1626,51 @@ void loop() {
         } else if (isHourlyEffect) {
             handleHourlyEffect(currentMillis);
         } else {
-            // 修改整点特效的触发检查逻辑
-            static bool hourlyEffectTriggered = false;
-            if (rtc.minute == 0 && rtc.second < 2 && !hourlyEffectTriggered) {
-                isHourlyEffect = true;
-                hourlyEffectStart = currentMillis;
-                hourlyEffectTriggered = true;
-                hourlyEffectFrame = 0;  // 重置特效帧
+            // 在正常的颜色渐变和呼吸效果部分修改
+            if (currentMillis - lastHueUpdate >= HUE_UPDATE_INTERVAL) {
+                lastHueUpdate = currentMillis;
                 
-                // 根据当前小时选择对应的整点特效
-                if (rtc.hour >= 6 && rtc.hour < 12) {
-                    currentHourlyEffect = &MORNING_EFFECT;
-                } else if (rtc.hour >= 12 && rtc.hour < 18) {
-                    currentHourlyEffect = &DAY_EFFECT;
-                } else if (rtc.hour >= 18 && rtc.hour < 22) {
-                    currentHourlyEffect = &EVENING_EFFECT;
-                } else {
-                    currentHourlyEffect = &NIGHT_EFFECT;
+                // 更新色相值
+                currentHue += hueSpeed;
+                if (currentHue >= 360) {
+                    currentHue = 0;
                 }
                 
-                // 由于无法直接获取当前自定义字符，我们只需确保在特效结束时恢复原始字符
-                memcpy(originalChars[0], clockChar, 8);
-                memcpy(originalChars[1], thermometer, 8);
-                memcpy(originalChars[2], humidityChar, 8);
-                memcpy(originalChars[3], lightChar, 8);
+                // 计算呼吸效果
+                float breatheProgress = (sin(currentMillis * breatheSpeed) + 1.0) / 2.0;
+                breatheValue = BREATHE_MIN + (BREATHE_MAX - BREATHE_MIN) * breatheProgress * breatheDepth;
                 
-            } else if (rtc.minute != 0) {
-                hourlyEffectTriggered = false;  // 重置触发标志
+                // 将HSV转换为RGB
+                int r, g, b;
+                // 根据时间段调整饱和度和明度
+                if (rtc.hour >= 22 || rtc.hour < 6) {
+                    // 夜间降低饱和度和明度
+                    saturation = 0.7;
+                    value = 0.6;
+                } else if (rtc.hour >= 6 && rtc.hour < 9) {
+                    // 早晨逐渐提高饱和度和明度
+                    saturation = 0.8;
+                    value = 0.8;
+                } else {
+                    // 白天保持正常饱和度和明度
+                    saturation = 1.0;
+                    value = 1.0;
+                }
+                
+                hsvToRgb(currentHue, saturation, value, r, g, b);
+                
+                // 应用颜色和呼吸效果
+                setColor(r, g, b, breatheValue);
             }
             
-            // 正常的颜色渐变和呼吸效果
-            if (currentMillis - lastColorChange >= colorDuration) {
-                memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
-                currentColor = (currentColor + 1) % numThemeColors;
-                memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
-                
-                isTransitioning = true;
-                transitionStart = currentMillis;
-                lastColorChange = currentMillis;
-                colorDuration = random(1000, 10000);
-                
-                // 随机变化呼吸速度，使效果更自然
-                currentBreatheSpeed = random(100) < 30 ? BREATHE_SPEED_SLOW : BREATHE_SPEED_NORMAL;
-            }
-            
-            // 每隔一段时间随机调整呼吸速度和深度
+            // 每隔一段时间随机调整呼吸和流光参数
             if (currentMillis - lastBreatheAdjustTime > BREATHE_ADJUST_INTERVAL) {
                 lastBreatheAdjustTime = currentMillis;
-                breatheSpeed = random(5, 15) / 10000.0; // 随机呼吸速度，0.0005到0.0015之间
-                breatheDepth = random(5, 10) / 10.0;    // 随机呼吸深度，0.5到1.0之间
-            }
-            
-            // 计算呼吸效果
-            float breatheProgress = (sin(currentMillis * breatheSpeed) + 1.0) / 2.0; // 使用正弦波生成呼吸效果
-            breatheValue = BREATHE_MIN + (BREATHE_MAX - BREATHE_MIN) * breatheProgress * breatheDepth;
-            
-            // 应用颜色和呼吸效果
-            if (!isManualColorControl) {
-                setColor(
-                    currentThemeColors[currentColor][0],
-                    currentThemeColors[currentColor][1],
-                    currentThemeColors[currentColor][2],
-                    breatheValue
-                );
+                breatheSpeed = random(5, 15) / 10000.0;
+                breatheDepth = random(5, 10) / 10.0;
+                
+                // 随机调整色相变化速度
+                hueSpeed = random(3, 10) / 10.0; // 0.3 到 1.0 之间
             }
         }
     }
