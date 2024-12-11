@@ -1,0 +1,214 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include "DFRobot_BNO055.h"
+#include "EMGFilters.h"
+
+#define MIN_PULSE_WIDTH       650
+#define MAX_PULSE_WIDTH       2350
+#define FREQUENCY             50
+#define SensorInputPin A0     // 肌电传感器输入引脚
+#define FILTER_ALPHA 0.1  // 低通滤波器系数
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+typedef DFRobot_BNO055_IIC    BNO;
+BNO   bno(&Wire, 0x28);
+
+// 定义舵机引脚
+int hand = 11;
+int wrist = 12;
+int elbow = 13;
+int shoulder = 14;
+int base = 15;
+
+// EMG相关变量
+unsigned long threshold = 0;  
+unsigned long EMG_num = 0;    
+EMGFilters myFilter;
+SAMPLE_FREQUENCY sampleRate = SAMPLE_FREQ_500HZ;
+NOTCH_FREQUENCY humFreq = NOTCH_FREQ_50HZ;
+
+// 夹爪状态机
+enum GripperState {OPEN, CLOSING, CLOSED};
+GripperState currentState = OPEN;
+
+// 函数声明
+void printLastOperateStatus(BNO::eStatus_t eStatus);
+int getEMGCount(int gforce_envelope);
+void calibrateEMG();
+float lowPassFilter(float input, float prev);
+float lowPassFilter(float input, float prev, float alpha);
+
+void setup() 
+{
+  Serial.begin(115200);
+  
+  // 初始化PWM控制器
+  pwm.begin();
+  pwm.setPWMFreq(FREQUENCY);
+  pwm.setPWM(hand, 0, 90);  // 设置夹爪初始位置
+  
+  // 初始化BNO055传感器
+  bno.reset();
+  while(bno.begin() != BNO::eStatusOK) {
+    Serial.println("bno begin failed");
+    printLastOperateStatus(bno.lastOperateStatus);
+    delay(2000);
+  }
+  
+  // 配置BNO055
+  bno.setOprMode(BNO::eOprModeNdof);
+  bno.setAccRange(BNO::eAccRange_4G);
+  bno.setAccBandWidth(BNO::eAccBandWidth_62_5);
+
+  // 初始化EMG滤波器
+  myFilter.init(sampleRate, humFreq, true, true, true);
+  
+  // 执行EMG校准
+  calibrateEMG();
+}
+
+void calibrateEMG() 
+{
+  Serial.println("Starting EMG calibration...");
+  long sum = 0;
+  const int samples = 100;
+  for (int i = 0; i < samples; i++) {
+    int emgData = analogRead(SensorInputPin);
+    sum += abs(emgData);
+    delay(10);
+  }
+  threshold = sum / samples * 1.5; // 取平均值的1.5倍作为阈值
+  Serial.print("Calibration done, threshold = ");
+  Serial.println(threshold);
+}
+
+float lowPassFilter(float input, float prev) {
+  return lowPassFilter(input, prev, 0.1);
+}
+
+float lowPassFilter(float input, float prev, float alpha) {
+  return alpha * input + (1 - alpha) * prev;
+}
+
+void moveMotorWithEuler(int motorOut, float angle, float minAngle, float maxAngle)
+{
+  int pulse_wide = map(int(angle * 100), int(minAngle * 100), int(maxAngle * 100), 
+                      MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
+  int pulse_width = int(float(pulse_wide) / 1000000 * FREQUENCY * 4096);
+  pwm.setPWM(motorOut, 0, pulse_width);
+}
+
+void controlGripperWithStateMachine(bool shouldGrip, int envelope) 
+{
+  static unsigned long lastActionTime = 0;
+  unsigned long now = millis();
+  static int gripStrength = 0;  // 抓取力度
+  
+  switch(currentState) {
+    case OPEN:
+      if (shouldGrip) {
+        pwm.setPWM(hand, 0, 180);
+        currentState = CLOSING;
+        lastActionTime = now;
+        Serial.println("Grip detected - Closing gripper");
+      }
+      break;
+      
+    case CLOSING:
+      if (now - lastActionTime > 500) {
+        currentState = CLOSED;
+      }
+      break;
+      
+    case CLOSED:
+      if (!shouldGrip) {
+        pwm.setPWM(hand, 0, 90);
+        currentState = OPEN;
+        Serial.println("Relaxed - Opening gripper");
+      }
+      break;
+  }
+}
+
+void loop() 
+{
+  // 获取欧拉角数据并应用低通滤波
+  static float yawPrev = 0, pitchPrev = 0, rollPrev = 0;
+  BNO::sEulAnalog_t euler = bno.getEul();
+  
+  float filteredYaw = lowPassFilter(euler.head, yawPrev);
+  float filteredPitch = lowPassFilter(euler.pitch, pitchPrev);
+  float filteredRoll = lowPassFilter(euler.roll, rollPrev);
+  
+  yawPrev = filteredYaw;
+  pitchPrev = filteredPitch;
+  rollPrev = filteredRoll;
+
+  // 使用欧拉角控制机械臂
+  moveMotorWithEuler(base, filteredYaw, -180.0, 180.0);      
+  moveMotorWithEuler(shoulder, filteredPitch, -90.0, 90.0);  
+  moveMotorWithEuler(elbow, filteredRoll, -90.0, 90.0);     
+
+  // 处理EMG信号控制夹爪
+  int emgData = analogRead(SensorInputPin);
+  int dataAfterFilter = myFilter.update(emgData);
+  int envelope = sq(dataAfterFilter);
+  envelope = (envelope > threshold) ? envelope : 0;
+
+  // 使用状态机控制夹爪
+  bool shouldGrip = getEMGCount(envelope);
+  controlGripperWithStateMachine(shouldGrip, envelope);
+
+  // 打印调试信息
+  Serial.print("Euler: Yaw=");
+  Serial.print(filteredYaw);
+  Serial.print(" Pitch=");
+  Serial.print(filteredPitch);
+  Serial.print(" Roll=");
+  Serial.println(filteredRoll);
+  
+  delayMicroseconds(500);
+}
+
+// EMG信号检测函数
+int getEMGCount(int gforce_envelope)
+{
+  static long integralData = 0;
+  static long integralDataEve = 0;
+  static bool remainFlag = false;
+  static unsigned long timeMillis = 0;
+  static unsigned long timeBeginzero = 0;
+  static int TimeStandard = 200;
+
+  integralDataEve = integralData;
+  integralData += gforce_envelope;
+
+  if ((integralDataEve == integralData) && (integralDataEve != 0)) {
+    timeMillis = millis();
+    if (remainFlag) {
+      timeBeginzero = timeMillis;
+      remainFlag = false;
+      return 0;
+    }
+    if ((timeMillis - timeBeginzero) > TimeStandard) {
+      integralDataEve = integralData = 0;
+      return 1;
+    }
+    return 0;
+  } else {
+    remainFlag = true;
+    return 0;
+  }
+}
+
+void printLastOperateStatus(BNO::eStatus_t eStatus)
+{
+  switch(eStatus) {
+    case BNO::eStatusOK:    Serial.println("everything ok"); break;
+    case BNO::eStatusErr:   Serial.println("unknow error"); break;
+    case BNO::eStatusErrDeviceNotDetect:    Serial.println("device not detected"); break;
+    case BNO::eStatusErrDeviceReadyTimeOut: Serial.println("device ready time out"); break;
+    case BNO::eStatusErrDeviceStatus:       Serial.println("device internal status error"); break;
+    default: Serial.println("unknow status"); break;
+  }
+}
