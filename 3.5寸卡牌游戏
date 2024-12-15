@@ -1,0 +1,322 @@
+#include <TFT_eSPI.h> 
+#include <SPI.h>
+#include "touch.h"
+
+TFT_eSPI my_lcd = TFT_eSPI();
+
+// 游戏相关常量
+#define CARD_WIDTH 50          // 减小卡片宽度
+#define CARD_HEIGHT 70         // 减小卡片高度
+#define CARD_MARGIN 8         // 减小卡片间距
+#define CARDS_PER_ROW 4       // 每行4张卡片
+#define CARDS_PER_COL 3       // 每列3张卡片
+#define TOTAL_CARDS (CARDS_PER_ROW * CARDS_PER_COL)
+#define HEADER_HEIGHT 35      // 减小顶部区域高度，因为内容更少了
+
+// 颜色定义
+#define BACKGROUND_COLOR 0x2945  // 深蓝色背景
+#define CARD_BACK_COLOR 0x7BEF   // 卡片背面颜色（浅蓝色）
+#define CARD_FRONT_COLOR 0x0B4D  // 卡片正面颜色（浅绿色）
+#define TEXT_COLOR 0xFFFF        // 文字颜色（白色）
+#define BORDER_COLOR 0xFFFF      // 边框颜色（白色）
+
+// 卡片结构体
+struct Card {
+    int x;
+    int y;
+    int value;
+    bool isFlipped;
+    bool isMatched;
+};
+
+Card cards[TOTAL_CARDS];
+int firstCardIndex = -1;
+int score = 0;
+int moves = 0;
+
+// 在全局变量区域添加
+enum GameRank {
+    RANK_S, // 完美 (最少步数)
+    RANK_A, // 优
+    RANK_B, // 良好
+    RANK_C  // 完成
+};
+
+// 初始化卡片
+void initializeCards() {
+    // 创建配对值（1-6，每个值出现两次）
+    int values[TOTAL_CARDS];
+    for(int i = 0; i < TOTAL_CARDS; i++) {
+        values[i] = (i / 2) + 1;
+    }
+    
+    // 随机打乱卡片
+    for(int i = TOTAL_CARDS - 1; i > 0; i--) {
+        int j = random(i + 1);
+        int temp = values[i];
+        values[i] = values[j];
+        values[j] = temp;
+    }
+    
+    // 初始化卡片位置和值
+    int startX = (my_lcd.width() - (CARDS_PER_ROW * (CARD_WIDTH + CARD_MARGIN))) / 2;
+    int startY = HEADER_HEIGHT + (my_lcd.height() - HEADER_HEIGHT - (CARDS_PER_COL * (CARD_HEIGHT + CARD_MARGIN))) / 2;
+    
+    for(int i = 0; i < TOTAL_CARDS; i++) {
+        int row = i / CARDS_PER_ROW;
+        int col = i % CARDS_PER_ROW;
+        cards[i].x = startX + col * (CARD_WIDTH + CARD_MARGIN);
+        cards[i].y = startY + row * (CARD_HEIGHT + CARD_MARGIN);
+        cards[i].value = values[i];
+        cards[i].isFlipped = false;
+        cards[i].isMatched = false;
+    }
+}
+
+// 绘制卡片
+void drawCard(int index) {
+    Card card = cards[index];
+    if(card.isMatched) {
+        // 已匹配的卡片用背景色填充，确保完全清除
+        my_lcd.fillRect(card.x, card.y, CARD_WIDTH, CARD_HEIGHT, BACKGROUND_COLOR);
+    } else if(card.isFlipped) {
+        // 显示卡片正面
+        my_lcd.fillRect(card.x, card.y, CARD_WIDTH, CARD_HEIGHT, CARD_FRONT_COLOR);
+        my_lcd.drawRect(card.x, card.y, CARD_WIDTH, CARD_HEIGHT, BORDER_COLOR);
+        
+        // 显示卡片数值
+        char valueStr[3];
+        sprintf(valueStr, "%d", card.value);
+        my_lcd.setTextColor(TEXT_COLOR);  // 使用白色文字
+        my_lcd.setTextSize(4);  // 更大的文字尺寸
+        
+        // 使用 textWidth 计算文字宽度
+        int strWidth = my_lcd.textWidth(valueStr);
+        int textX = card.x + (CARD_WIDTH - strWidth) / 2;
+        int textY = card.y + (CARD_HEIGHT - 32) / 2;  // 32 是文字高度（4 * 8）
+        
+        // 先画一个黑色背景框
+        my_lcd.fillRect(textX-2, textY-2, strWidth+4, 32+4, 0x0000);
+        // 然后画白色文字
+        my_lcd.drawString(valueStr, textX, textY);
+        
+        // 添加装饰性边框
+        my_lcd.drawRect(card.x + 2, card.y + 2, CARD_WIDTH - 4, CARD_HEIGHT - 4, BORDER_COLOR);
+    } else {
+        // 显示卡片背面
+        my_lcd.fillRect(card.x, card.y, CARD_WIDTH, CARD_HEIGHT, CARD_BACK_COLOR);
+        my_lcd.drawRect(card.x, card.y, CARD_WIDTH, CARD_HEIGHT, BORDER_COLOR);
+        
+        // 添加背面花纹
+        for(int i = 0; i < 5; i++) {
+            my_lcd.drawRect(card.x + (i*5), card.y + (i*5), 
+                           CARD_WIDTH - (i*10), CARD_HEIGHT - (i*10), 
+                           BORDER_COLOR);
+        }
+    }
+}
+
+// 绘制游戏界面
+void drawGameUI() {
+    // 首先清除整个屏幕
+    my_lcd.fillScreen(BACKGROUND_COLOR);
+    
+    // 绘制所有卡片
+    for(int i = 0; i < TOTAL_CARDS; i++) {
+        drawCard(i);
+    }
+    
+    // 只显示分数和移动次数
+    my_lcd.setTextColor(BORDER_COLOR);
+    my_lcd.setTextSize(2);
+    
+    // 显示分数和移动次数
+    char scoreStr[32];
+    sprintf(scoreStr, "Score:%d Moves:%d", score, moves);
+    
+    // 计算文字宽度来确定位置，居中显示
+    int scoreWidth = my_lcd.textWidth(scoreStr);
+    int textX = (my_lcd.width() - scoreWidth) / 2;  // 居中显示
+    my_lcd.drawString(scoreStr, textX, 10);
+}
+
+// 添加判断游戏是否结束的函数
+bool isGameComplete() {
+    for(int i = 0; i < TOTAL_CARDS; i++) {
+        if(!cards[i].isMatched) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 添加获取游戏等级的函数
+GameRank getGameRank(int moves) {
+    // 理论最少步数是卡片对数，即TOTAL_CARDS/2
+    int perfectMoves = TOTAL_CARDS/2;
+    
+    if(moves <= perfectMoves + 2) return RANK_S;
+    else if(moves <= perfectMoves + 5) return RANK_A;
+    else if(moves <= perfectMoves + 8) return RANK_B;
+    else return RANK_C;
+}
+
+// 添加显示结束动画的函数
+void showCompletionAnimation(GameRank rank) {
+    // 清屏
+    my_lcd.fillScreen(BACKGROUND_COLOR);
+    
+    // 显示"COMPLETE!"
+    my_lcd.setTextColor(BORDER_COLOR);
+    my_lcd.setTextSize(4);
+    my_lcd.drawString("COMPLETE!", my_lcd.width()/2 - 100, my_lcd.height()/2 - 60);
+    
+    // 显示分数和步数
+    char scoreStr[32];
+    sprintf(scoreStr, "Score: %d", score);
+    my_lcd.setTextSize(2);
+    my_lcd.drawString(scoreStr, my_lcd.width()/2 - 50, my_lcd.height()/2);
+    
+    char movesStr[32];
+    sprintf(movesStr, "Moves: %d", moves);
+    my_lcd.drawString(movesStr, my_lcd.width()/2 - 50, my_lcd.height()/2 + 25);
+    
+    // 根据等级显示不同的评价
+    const char* rankText;
+    uint16_t rankColor;
+    switch(rank) {
+        case RANK_S:
+            rankText = "Perfect!";
+            rankColor = 0xFFE0; // 黄色
+            // 显示5个方块
+            for(int i = 0; i < 5; i++) {
+                int rectX = my_lcd.width()/2 - 60 + i * 30;
+                my_lcd.fillRect(rectX, my_lcd.height()/2 + 55, 16, 16, rankColor);
+                my_lcd.drawRect(rectX, my_lcd.height()/2 + 55, 16, 16, BORDER_COLOR);
+            }
+            break;
+        case RANK_A:
+            rankText = "Excellent!";
+            rankColor = 0x07E0; // 绿色
+            // 显示4个方块
+            for(int i = 0; i < 4; i++) {
+                int rectX = my_lcd.width()/2 - 45 + i * 30;
+                my_lcd.fillRect(rectX, my_lcd.height()/2 + 55, 16, 16, rankColor);
+                my_lcd.drawRect(rectX, my_lcd.height()/2 + 55, 16, 16, BORDER_COLOR);
+            }
+            break;
+        case RANK_B:
+            rankText = "Good Job!";
+            rankColor = 0x001F; // 蓝色
+            // 显示3个方块
+            for(int i = 0; i < 3; i++) {
+                int rectX = my_lcd.width()/2 - 30 + i * 30;
+                my_lcd.fillRect(rectX, my_lcd.height()/2 + 55, 16, 16, rankColor);
+                my_lcd.drawRect(rectX, my_lcd.height()/2 + 55, 16, 16, BORDER_COLOR);
+            }
+            break;
+        default:
+            rankText = "Completed!";
+            rankColor = 0xF800; // 红色
+            // 显示2个方块
+            for(int i = 0; i < 2; i++) {
+                int rectX = my_lcd.width()/2 - 15 + i * 30;
+                my_lcd.fillRect(rectX, my_lcd.height()/2 + 55, 16, 16, rankColor);
+                my_lcd.drawRect(rectX, my_lcd.height()/2 + 55, 16, 16, BORDER_COLOR);
+            }
+            break;
+    }
+    
+    my_lcd.setTextColor(rankColor);
+    my_lcd.setTextSize(3);
+    my_lcd.drawString(rankText, my_lcd.width()/2 - 80, my_lcd.height()/2 - 20);
+    
+    // 显示"Tap to restart"
+    my_lcd.setTextColor(BORDER_COLOR);
+    my_lcd.setTextSize(1);
+    my_lcd.drawString("Tap to restart", my_lcd.width()/2 - 40, my_lcd.height() - 30);
+    
+    // 等待点击重新开始
+    while(!touch_touched()) {
+        delay(50);
+    }
+    
+    // 重置游戏
+    score = 0;
+    moves = 0;
+    firstCardIndex = -1;
+    initializeCards();
+    drawGameUI();
+}
+
+void setup() {
+    my_lcd.init();
+    my_lcd.setRotation(1);    // 设置为横向显示（逆时针旋转90度）
+    touch_init(my_lcd.width(), my_lcd.height(), my_lcd.getRotation());
+    
+    // 显示启动画面
+    my_lcd.fillScreen(BACKGROUND_COLOR);
+    my_lcd.setTextColor(BORDER_COLOR);
+    my_lcd.setTextSize(3);
+    my_lcd.drawString("Memory", my_lcd.width()/2 - 60, my_lcd.height()/2 - 40);
+    my_lcd.drawString("Game", my_lcd.width()/2 - 45, my_lcd.height()/2);
+    delay(2000);  // 显示2秒
+    
+    randomSeed(analogRead(0));
+    initializeCards();
+    drawGameUI();
+}
+
+void loop() {
+    if(touch_touched()) {
+        int x = touch_last_x;
+        int y = touch_last_y;
+        
+        // 检查是否点击了卡片
+        for(int i = 0; i < TOTAL_CARDS; i++) {
+            if(x >= cards[i].x && x < cards[i].x + CARD_WIDTH &&
+               y >= cards[i].y && y < cards[i].y + CARD_HEIGHT) {
+                
+                if(!cards[i].isFlipped && !cards[i].isMatched) {
+                    cards[i].isFlipped = true;
+                    drawCard(i);
+                    
+                    if(firstCardIndex == -1) {
+                        firstCardIndex = i;
+                    } else {
+                        moves++;
+                        
+                        // 检查是否匹
+                        if(cards[firstCardIndex].value == cards[i].value) {
+                            // 显示第二张卡片1.5秒
+                            delay(1500);
+                            
+                            cards[firstCardIndex].isMatched = true;
+                            cards[i].isMatched = true;
+                            score += 10;
+                            
+                            // 检查游戏是否完成
+                            if(isGameComplete()) {
+                                delay(500); // 短暂延迟
+                                showCompletionAnimation(getGameRank(moves));
+                            } else {
+                                // 重绘整个界面以清除可能的残影
+                                drawGameUI();
+                            }
+                        } else {
+                            // 显示不匹配的卡片1.5秒
+                            delay(1500);
+                            cards[firstCardIndex].isFlipped = false;
+                            cards[i].isFlipped = false;
+                            drawGameUI();  // 重绘整个界面
+                        }
+                        
+                        firstCardIndex = -1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    delay(50);
+} 
