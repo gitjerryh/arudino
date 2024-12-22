@@ -1,0 +1,276 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
+#include <SPIFFS.h>
+#include <TJpg_Decoder.h>
+
+#define WIFI_SSID "ESP32-Album"     
+#define WIFI_PASSWORD "12345678"     
+
+TFT_eSPI tft = TFT_eSPI();
+WebServer server(80);
+
+// 屏幕分辨率
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 320
+
+// JPEG解码回调函数
+bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap)
+{
+    // 转换RGB565颜色格式
+    for(uint16_t i = 0; i < w * h; i++) {
+        // 从RGB565提取RGB分量
+        uint16_t color = bitmap[i];
+        uint8_t r = (color >> 11) & 0x1F;
+        uint8_t g = (color >> 5) & 0x3F;
+        uint8_t b = color & 0x1F;
+        
+        // 扩展到8位
+        r = (r << 3) | (r >> 2);
+        g = (g << 2) | (g >> 4);
+        b = (b << 3) | (b >> 2);
+        
+        // 重新组合为RGB565
+        bitmap[i] = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+    }
+    
+    // 推送到显示屏
+    tft.pushImage(x, y, w, h, bitmap);
+    return true;
+}
+
+void handleRoot() {
+    Serial.println("处理根路径请求");
+    String html = "<html><head>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>";
+    // 添加必要的CSS样式
+    html += ".container { max-width: 800px; margin: 0 auto; padding: 20px; }";
+    html += ".preview-container { position: relative; max-width: 100%; margin: 20px 0; }";
+    html += ".preview { max-width: 100%; display: block; }";
+    html += ".button { background: #008CBA; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }";
+    html += ".file-input { margin: 20px 0; }";
+    html += "</style>";
+    html += "<script src='https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js'></script>";
+    html += "</head><body style='text-align:center; font-family: Arial, sans-serif;'>";
+    
+    html += "<div class='container'>";
+    html += "<h1>ESP32 照片相册</h1>";
+    
+    // 添加模式选择
+    html += "<div style='margin: 20px 0;'>";
+    html += "<label><input type='radio' name='mode' value='stretch' checked> 拉伸填充</label>";
+    html += "<label style='margin-left: 20px;'><input type='radio' name='mode' value='fit'> 保持比例</label>";
+    html += "</div>";
+    
+    // 图片选择和预览区域
+    html += "<input type='file' accept='image/*,.heic' class='file-input' onchange='handleImage(event)'>";
+    html += "<div class='preview-container'>";
+    html += "<img id='preview' class='preview' style='display:none'>";
+    html += "</div>";
+    
+    // 图片处理按钮
+    html += "<button onclick='processAndUpload()' class='button' style='display:none' id='uploadBtn'>上传到显示屏</button>";
+    
+    html += "</div>";
+    
+    // JavaScript代码
+    html += "<script>";
+    html += "let currentFile = null;";
+    
+    // 处理图片选择
+    html += "async function handleImage(event) {";
+    html += "  const file = event.target.files[0];";
+    html += "  if (!file) return;";
+    
+    // 添加 HEIC 处理
+    html += "  let processedFile = file;";
+    html += "  if (file.type === 'image/heic' || file.name.toLowerCase().endsWith('.heic')) {";
+    html += "    try {";
+    html += "      const blob = await heic2any({ blob: file, toType: 'image/jpeg' });";
+    html += "      processedFile = new File([blob], file.name.replace('.heic', '.jpg'), { type: 'image/jpeg' });";
+    html += "      alert('HEIC图片已自动转换为JPEG格式');";
+    html += "    } catch (error) {";
+    html += "      alert('HEIC转换失败：' + error);";
+    html += "      return;";
+    html += "    }";
+    html += "  }";
+    
+    html += "  currentFile = processedFile;";
+    html += "  const reader = new FileReader();";
+    html += "  reader.onload = function(e) {";
+    html += "    const img = document.getElementById('preview');";
+    html += "    img.src = e.target.result;";
+    html += "    img.style.display = 'block';";
+    html += "    document.getElementById('uploadBtn').style.display = 'inline-block';";
+    html += "  };";
+    html += "  reader.readAsDataURL(processedFile);";
+    html += "}";
+    
+    // 修改处理图片上传的函数
+    html += "function processAndUpload() {";
+    html += "  if (!currentFile) return;";
+    html += "  const img = document.getElementById('preview');";
+    html += "  const canvas = document.createElement('canvas');";
+    html += "  const ctx = canvas.getContext('2d');";
+    html += "  canvas.width = 240;";
+    html += "  canvas.height = 320;";
+    
+    html += "  const tempImg = new Image();";
+    html += "  tempImg.onload = function() {";
+    html += "    const mode = document.querySelector('input[name=\"mode\"]:checked').value;";
+    html += "    if (mode === 'stretch') {";
+    // 拉伸填充模式
+    html += "      ctx.drawImage(tempImg, 0, 0, 240, 320);";
+    html += "    } else {";
+    // 保持比例模式
+    html += "      const scale = Math.min(240 / tempImg.width, 320 / tempImg.height);";
+    html += "      const scaledWidth = tempImg.width * scale;";
+    html += "      const scaledHeight = tempImg.height * scale;";
+    html += "      const x = (240 - scaledWidth) / 2;";
+    html += "      const y = (320 - scaledHeight) / 2;";
+    html += "      ctx.fillStyle = 'black';";
+    html += "      ctx.fillRect(0, 0, 240, 320);";
+    html += "      ctx.drawImage(tempImg, x, y, scaledWidth, scaledHeight);";
+    html += "    }";
+    
+    html += "    canvas.toBlob(function(blob) {";
+    html += "      const formData = new FormData();";
+    html += "      formData.append('photo', blob, 'photo.jpg');";
+    html += "      fetch('/upload', {";
+    html += "        method: 'POST',";
+    html += "        body: formData";
+    html += "      }).then(response => {";
+    html += "        if(response.ok) {";
+    html += "          alert('上传成功！');";
+    html += "        } else {";
+    html += "          alert('上传失败，请重试');";
+    html += "        }";
+    html += "      }).catch(error => {";
+    html += "        alert('上传出错：' + error);";
+    html += "      });";
+    html += "    }, 'image/jpeg', 0.95);";
+    html += "  };";
+    html += "  tempImg.src = img.src;";
+    html += "}";
+    html += "</script>";
+    
+    html += "</body></html>";
+    server.send(200, "text/html", html);
+}
+
+void handleUpload() {
+    Serial.println("处理上传请求");
+    server.send(200, "text/plain", "");
+}
+
+// 修改计算缩放比例的函数
+uint8_t calculateJpegScale(uint16_t imageWidth, uint16_t imageHeight) {
+    // 计算理想缩放比例
+    float scaleW = (float)imageWidth / SCREEN_WIDTH;
+    float scaleH = (float)imageHeight / SCREEN_HEIGHT;
+    
+    // 选择合适的缩放比例，确保图片完整显示并尽可能大
+    float idealScale = (scaleW > scaleH) ? scaleW : scaleH;
+    
+    // TJpg_Decoder只支持1,2,4,8的缩放
+    uint8_t scale = 1;
+    if (idealScale <= 1) {
+        return 1;  // 图片小于或等于屏幕尺寸
+    } else if (idealScale <= 2) {
+        return 2;
+    } else if (idealScale <= 4) {
+        return 4;
+    } else {
+        return 8;
+    }
+}
+
+void handleFileUpload() {
+    HTTPUpload& upload = server.upload();
+    static File file;
+    
+    if(upload.status == UPLOAD_FILE_START) {
+        Serial.println("开始文件上传");
+        if(SPIFFS.exists("/photo.jpg")) {
+            SPIFFS.remove("/photo.jpg");
+        }
+        file = SPIFFS.open("/photo.jpg", FILE_WRITE);
+        if(!file) {
+            Serial.println("文件创建失败");
+            return server.send(500, "text/plain", "Failed to open file for writing");
+        }
+    } 
+    else if(upload.status == UPLOAD_FILE_WRITE) {
+        if(file) {
+            file.write(upload.buf, upload.currentSize);
+        }
+    } 
+    else if(upload.status == UPLOAD_FILE_END) {
+        if(file) {
+            file.close();
+            Serial.println("文件上传完成");
+            Serial.printf("文件大��: %d bytes\n", upload.totalSize);
+            
+            if(SPIFFS.exists("/photo.jpg")) {
+                // 清屏
+                tft.fillScreen(TFT_BLACK);
+                
+                // 设置JPEG解码器的缩放比例为1（不缩放）
+                TJpgDec.setJpgScale(1);
+                
+                // 直接在屏幕中央显示图片
+                bool result = TJpgDec.drawFsJpg(0, 0, "/photo.jpg");
+                if(!result) {
+                    Serial.println("图片显示失败");
+                } else {
+                    Serial.println("图片显示成功");
+                }
+            }
+        }
+        server.send(200, "text/plain", "Upload successful");
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    
+    // 初始化SPIFFS
+    if(!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS挂载失败");
+        return;
+    }
+    Serial.println("SPIFFS挂载成功");
+
+    // 初始化显示屏
+    tft.begin();
+    tft.setRotation(2); 
+    tft.fillScreen(TFT_BLACK);
+    Serial.println("显示屏初始化完成");
+
+    // 始化JPEG解码器
+    TJpgDec.setCallback(tft_output);
+    TJpgDec.setSwapBytes(true);  // 在初始化时就设置字节交换
+    Serial.println("JPEG解码器初始化完成");
+
+    // 配置AP模式
+    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
+    Serial.println("AP模式已启动");
+    Serial.print("IP地址: ");
+    Serial.println(WiFi.softAPIP());
+
+    // 配置Web服务器路由
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/upload", HTTP_POST, handleUpload, handleFileUpload);
+    
+    // 启动服务器
+    server.begin();
+    Serial.println("HTTP服务器已启动");
+}
+
+void loop() {
+    server.handleClient();
+}
+
