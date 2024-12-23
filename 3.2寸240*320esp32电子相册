@@ -212,7 +212,7 @@ void handleFileUpload() {
         if(file) {
             file.close();
             Serial.println("文件上传完成");
-            Serial.printf("文件大��: %d bytes\n", upload.totalSize);
+            Serial.printf("文件大小: %d bytes\n", upload.totalSize);
             
             if(SPIFFS.exists("/photo.jpg")) {
                 // 清屏
@@ -234,6 +234,141 @@ void handleFileUpload() {
     }
 }
 
+// 在文件开头的全局变量声明部分添加
+#define LOADING_BAR_WIDTH 180
+#define LOADING_BAR_HEIGHT 12
+#define LOADING_BAR_X ((SCREEN_WIDTH - LOADING_BAR_WIDTH) / 2)
+#define LOADING_BAR_Y ((SCREEN_HEIGHT - LOADING_BAR_HEIGHT) / 2)
+
+// 添加绘制��机图标的函数
+void drawCameraIcon(int centerX, int centerY, int size, uint16_t color) {
+    // 相机主体
+    tft.fillRoundRect(centerX - size/2, centerY - size/3, 
+                     size, size*2/3, size/8, color);
+    
+    // 镜头
+    tft.fillCircle(centerX, centerY, size/3, TFT_BLACK);
+    tft.fillCircle(centerX, centerY, size/4, color);
+    tft.fillCircle(centerX, centerY, size/6, TFT_BLACK);
+    
+    // 闪光灯
+    tft.fillRect(centerX + size/3, centerY - size/2, 
+                 size/6, size/6, color);
+}
+
+// 改进开机动画函数
+void showBootAnimation() {
+    tft.fillScreen(TFT_BLACK);
+    
+    // 绘制初始相机图标
+    int iconSize = 40;
+    drawCameraIcon(SCREEN_WIDTH/2, SCREEN_HEIGHT/3, iconSize, TFT_WHITE);
+    
+    // 标题文字动画效果
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextSize(2);
+    
+    // 修改标题显示部分
+    const char* title = "ESP32 Album";
+    // 减小字符间距为16像素
+    int charSpacing = 16;  
+    // 计算整个标题的总宽度
+    int totalWidth = strlen(title) * charSpacing;
+    // 计算起始X坐标，使标题居中
+    int titleX = (SCREEN_WIDTH - totalWidth) / 2;
+    int titleY = SCREEN_HEIGHT/3 + 50;
+    
+    for(int i = 0; title[i] != '\0'; i++) {
+        char c[2] = {title[i], '\0'};
+        tft.setTextColor(random(0xFFFF)); // 随机颜色
+        // 使用绝对位置来绘制每个字符
+        tft.drawString(c, titleX + i*charSpacing, titleY);
+        delay(100);
+    }
+    
+    // 调整进度条位置，将其移到屏幕下方
+    #undef LOADING_BAR_Y
+    #define LOADING_BAR_Y (SCREEN_HEIGHT * 2/3)  // 移动到屏幕下方三分之二处
+    
+    // 绘制进度条外框
+    tft.drawRoundRect(LOADING_BAR_X - 2, LOADING_BAR_Y - 2,
+                     LOADING_BAR_WIDTH + 4, LOADING_BAR_HEIGHT + 4, 
+                     LOADING_BAR_HEIGHT/2, TFT_WHITE);
+    
+    // 进度条动画
+    for(int i = 0; i <= 100; i++) {
+        // 计算进度条宽度
+        int progressWidth = (LOADING_BAR_WIDTH * i) / 100;
+        
+        // 使用渐变色填充进度条
+        uint16_t color = tft.color565(map(i, 0, 100, 0, 255), 
+                                    map(i, 0, 100, 0, 128), 
+                                    255);
+        
+        // 清除旧进度条区域
+        tft.fillRoundRect(LOADING_BAR_X, LOADING_BAR_Y,
+                         LOADING_BAR_WIDTH, LOADING_BAR_HEIGHT,
+                         LOADING_BAR_HEIGHT/2, TFT_BLACK);
+                         
+        // 绘制新进度条
+        tft.fillRoundRect(LOADING_BAR_X, LOADING_BAR_Y,
+                         progressWidth, LOADING_BAR_HEIGHT,
+                         LOADING_BAR_HEIGHT/2, color);
+        
+        // 显示百分比
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        String percentage = String(i) + "%";
+        tft.drawString(percentage, SCREEN_WIDTH/2, 
+                      LOADING_BAR_Y - 20);  // 将百分比显示在进度条上方
+        
+        // 旋转相机图标
+        if(i % 10 == 0) {
+            tft.fillRect(SCREEN_WIDTH/2 - iconSize/2 - 5,
+                        SCREEN_HEIGHT/3 - iconSize/2 - 5,
+                        iconSize + 10, iconSize + 10, TFT_BLACK);
+            drawCameraIcon(SCREEN_WIDTH/2, SCREEN_HEIGHT/3, 
+                         iconSize, TFT_WHITE);
+        }
+        
+        // 显示动态加载提示
+        static const char* messages[] = {
+            "Initializing",      // 初始化系统
+            "Network Setup",     // 配置网络
+            "Getting Ready",     // 准备就绪
+            "Welcome"           // 欢迎使用
+        };
+        int msgIndex = i / 25;
+        if(msgIndex > 3) msgIndex = 3;
+        
+        String msg = String(messages[msgIndex]);
+        // 添加动态点号
+        for(int j = 0; j <= (i % 3); j++) {
+            msg += ".";
+        }
+        
+        // 清除旧消息区域
+        tft.fillRect(0, LOADING_BAR_Y + LOADING_BAR_HEIGHT + 10,
+                    SCREEN_WIDTH, 20, TFT_BLACK);
+                    
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.drawString(msg, SCREEN_WIDTH/2,
+                      LOADING_BAR_Y + LOADING_BAR_HEIGHT + 20);  // 将提示信息显示在进度条下方
+        
+        delay(20);
+    }
+    
+    // 移除闪烁效果，改为平滑过渡
+    tft.fillScreen(TFT_BLACK);
+    
+    // 显示最终欢迎界面
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_GREEN);
+    tft.drawString("Ready!", SCREEN_WIDTH/2, SCREEN_HEIGHT/2);
+    delay(1000);
+    tft.fillScreen(TFT_BLACK);
+}
+
 void setup() {
     Serial.begin(115200);
     
@@ -249,6 +384,9 @@ void setup() {
     tft.setRotation(2); 
     tft.fillScreen(TFT_BLACK);
     Serial.println("显示屏初始化完成");
+
+    // 显示开机动画
+    showBootAnimation();
 
     // 始化JPEG解码器
     TJpgDec.setCallback(tft_output);
