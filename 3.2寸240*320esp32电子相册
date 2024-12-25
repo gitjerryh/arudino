@@ -5,9 +5,16 @@
 #include <TFT_eSPI.h>
 #include <SPIFFS.h>
 #include <TJpg_Decoder.h>
+#include <esp_wifi.h>
+#include <esp_system.h>
 
 #define WIFI_SSID "ESP32-Album"     
 #define WIFI_PASSWORD "12345678"     
+#define MAX_CONNECTIONS 4 // 最大连接数
+#define WIFI_POWER 20.5  // WiFi发射功率,最大20.5dBm
+#define WIFI_CHANNEL 6      // 使用固定信道6
+#define BEACON_INTERVAL 100 // 信标间隔100ms
+#define TX_POWER 82        // WiFi发射功率(约19.5dBm)
 
 TFT_eSPI tft = TFT_eSPI();
 WebServer server(80);
@@ -36,7 +43,7 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap)
         bitmap[i] = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
     }
     
-    // 推送到显示屏
+    // 推显示屏
     tft.pushImage(x, y, w, h, bitmap);
     return true;
 }
@@ -78,7 +85,7 @@ void handleRoot() {
     html += ".progress-bar { height: 4px; background: #f0f0f0; border-radius: 2px; margin: 20px 0; display: none; }";
     html += ".progress-bar-fill { height: 100%; background: #1a73e8; border-radius: 2px; width: 0%; transition: width 0.3s; }";
     
-    // 提示消息样式
+    // 提示信息样式
     html += ".message { padding: 12px; border-radius: 8px; margin: 10px 0; display: none; }";
     html += ".message.success { background: #e6f4ea; color: #1e8e3e; }";
     html += ".message.error { background: #fce8e6; color: #d93025; }";
@@ -102,7 +109,7 @@ void handleRoot() {
     // 文件上传区域
     html += "<div class='upload-area' id='dropZone'>";
     html += "<i class='fas fa-cloud-upload-alt'></i>";
-    html += "<p>点击或拖拽图片到此处上传</p>";
+    html += "<p>点击或拖拽图片此处上传</p>";
     html += "<input type='file' accept='image/*,.heic' id='fileInput' style='display:none'>";
     html += "</div>";
     
@@ -300,7 +307,7 @@ uint8_t calculateJpegScale(uint16_t imageWidth, uint16_t imageHeight) {
     float scaleW = (float)imageWidth / SCREEN_WIDTH;
     float scaleH = (float)imageHeight / SCREEN_HEIGHT;
     
-    // 选择合适的缩放比例，确保图片完整显示并尽可能大
+    // 选择合适的缩放比例，确保片完整显示并尽可能大
     float idealScale = (scaleW > scaleH) ? scaleW : scaleH;
     
     // TJpg_Decoder只支持1,2,4,8的缩放
@@ -346,7 +353,7 @@ void handleFileUpload() {
                 // 清屏
                 tft.fillScreen(TFT_BLACK);
                 
-                // 设置JPEG解码器的缩放比例为1（不缩放）
+                // ���置JPEG解码器的缩放比例为1（不缩放）
                 TJpgDec.setJpgScale(1);
                 
                 // 直接在屏幕中央显示图片
@@ -384,7 +391,7 @@ void drawCameraIcon(int centerX, int centerY, int size, uint16_t color) {
                  size/6, size/6, color);
 }
 
-// 改进开机动画函数
+// 改进开机动画函���
 void showBootAnimation() {
     tft.fillScreen(TFT_BLACK);
     
@@ -486,7 +493,7 @@ void showBootAnimation() {
         delay(20);
     }
     
-    // 移除闪烁效果，改为平滑过渡
+    // 移除闪烁效果，为平滑过渡
     tft.fillScreen(TFT_BLACK);
     
     // 显示最终欢迎界面
@@ -500,33 +507,128 @@ void showBootAnimation() {
 void setup() {
     Serial.begin(115200);
     
+    // WiFi初始化
+    Serial.println("正在初始化WiFi...");
+    
+    // 完全关闭WiFi并重置
+    WiFi.persistent(false);  // 禁用WiFi配置持久化
+    WiFi.disconnect(true);   // 断开所有连接
+    WiFi.mode(WIFI_OFF);     // 关闭WiFi
+    delay(100);
+    
+    esp_wifi_stop();        // 完全停止WiFi
+    delay(100);
+    
+    esp_wifi_deinit();      // 反初始化WiFi
+    delay(100);
+    
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT(); // 使用默认配置
+    esp_wifi_init(&cfg);    // 重新初始化WiFi
+    delay(100);
+    
+    esp_wifi_start();       // 启动WiFi
+    delay(100);
+    
+    // 设置WiFi模式
+    WiFi.mode(WIFI_AP);
+    delay(100);
+    
+    // 配置AP参数
+    wifi_config_t conf = {};
+    memset(&conf, 0, sizeof(conf));
+    
+    // 设置SSID和密码
+    strcpy((char*)conf.ap.ssid, WIFI_SSID);
+    strcpy((char*)conf.ap.password, WIFI_PASSWORD);
+    conf.ap.ssid_len = strlen(WIFI_SSID);
+    conf.ap.channel = WIFI_CHANNEL;
+    conf.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    conf.ap.ssid_hidden = 0;
+    conf.ap.max_connection = MAX_CONNECTIONS;
+    conf.ap.beacon_interval = BEACON_INTERVAL;
+    
+    // 应用AP配置
+    esp_wifi_set_config(WIFI_IF_AP, &conf);
+    
+    // 设置国家代码
+    wifi_country_t country = {
+        .cc = "CN",
+        .schan = 1,
+        .nchan = 13,
+        .max_tx_power = TX_POWER,
+        .policy = WIFI_COUNTRY_POLICY_MANUAL
+    };
+    esp_wifi_set_country(&country);
+    
+    // 设置协议模式(b/g)
+    esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+    
+    // 设置发射功率
+    esp_wifi_set_max_tx_power(TX_POWER);
+    
+    // 配置IP地址
+    WiFi.softAPConfig(IPAddress(192,168,4,1),    // AP IP
+                     IPAddress(192,168,4,1),    // 网关
+                     IPAddress(255,255,255,0)); // 子网掩码
+    
+    // 启动AP
+    bool apSuccess = WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL, false, MAX_CONNECTIONS);
+    if (!apSuccess) {
+        Serial.println("AP配置失败,重启设备!");
+        delay(1000);
+        ESP.restart();
+        return;
+    }
+    
+    // 等待AP完全启动
+    delay(500);
+    
+    Serial.println("AP模式启动成功");
+    Serial.printf("SSID: %s\n", WIFI_SSID);
+    Serial.printf("密码: %s\n", WIFI_PASSWORD);
+    Serial.printf("信道: %d\n", WIFI_CHANNEL);
+    Serial.printf("IP地址: %s\n", WiFi.softAPIP().toString().c_str());
+    
+    // WiFi事件处理
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info){
+        Serial.print("Station connected, MAC: ");
+        uint8_t* mac = info.wifi_ap_staconnected.mac;
+        for(int i = 0; i < 6; i++){
+            Serial.printf("%02X", mac[i]);
+            if(i < 5) Serial.print(":");
+        }
+        Serial.println();
+    }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+    
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info){
+        Serial.print("Station disconnected, MAC: ");
+        uint8_t* mac = info.wifi_ap_stadisconnected.mac;
+        for(int i = 0; i < 6; i++){
+            Serial.printf("%02X", mac[i]);
+            if(i < 5) Serial.print(":");
+        }
+        Serial.println();
+    }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
+
+    // 其他初始化代码...
     // 初始化SPIFFS
     if(!SPIFFS.begin(true)) {
         Serial.println("SPIFFS挂载失败");
         return;
     }
-    Serial.println("SPIFFS挂载成功");
-
+    
     // 初始化显示屏
     tft.begin();
-    tft.setRotation(2); 
+    tft.setRotation(2);
     tft.fillScreen(TFT_BLACK);
-    Serial.println("显示屏初始化完成");
-
+    
     // 显示开机动画
     showBootAnimation();
-
-    // 始化JPEG解码器
+    
+    // 初始化JPEG解码器
     TJpgDec.setCallback(tft_output);
-    TJpgDec.setSwapBytes(true);  // 在初始化时就设置字节交换
-    Serial.println("JPEG解码器初始化完成");
-
-    // 配置AP模式
-    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
-    Serial.println("AP模式已启动");
-    Serial.print("IP地址: ");
-    Serial.println(WiFi.softAPIP());
-
+    TJpgDec.setSwapBytes(true);
+    
     // 配置Web服务器路由
     server.on("/", HTTP_GET, handleRoot);
     server.on("/upload", HTTP_POST, handleUpload, handleFileUpload);
@@ -537,5 +639,38 @@ void setup() {
 }
 
 void loop() {
+    static unsigned long lastCheck = 0;
+    const unsigned long checkInterval = 5000; // 每5秒检查一次
+    
+    if (millis() - lastCheck >= checkInterval) {
+        lastCheck = millis();
+        
+        // 监控连接的设备数
+        uint8_t stationNum = WiFi.softAPgetStationNum();
+        Serial.printf("当前连接设备数: %d\n", stationNum);
+        
+        // 检查WiFi状态并尝试修复
+        if (WiFi.getMode() != WIFI_AP) {
+            Serial.println("WiFi模式异常,重新初始化...");
+            WiFi.mode(WIFI_AP);
+            delay(100);
+            
+            // 重新应用WiFi配置
+            wifi_config_t conf;
+            esp_wifi_get_config(WIFI_IF_AP, &conf);
+            esp_wifi_set_config(WIFI_IF_AP, &conf);
+            
+            // 重新设置发射功率
+            esp_wifi_set_max_tx_power(TX_POWER);
+        }
+        
+        // 检查并调整发射功率
+        int8_t power;
+        esp_wifi_get_max_tx_power(&power);
+        if (power != TX_POWER) {
+            esp_wifi_set_max_tx_power(TX_POWER);
+        }
+    }
+    
     server.handleClient();
 }
