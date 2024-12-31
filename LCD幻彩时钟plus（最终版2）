@@ -7,6 +7,9 @@
 #include <DNSServer.h>
 #include <time.h>
 #include <ArduinoJson.h>
+#include "esp_task_wdt.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
 
 // AP模式的配置
 const char* AP_SSID = "ESP32_RTC_Config";  // AP模式的SSID
@@ -61,6 +64,7 @@ void handleTimeSync();
 void handleNotFound();
 void handleScanWiFi();
 void handleConnectWiFi();
+void handleSetColor();
 void restoreOriginalChars();
 void displayTime();
 void displayEnvironmental();
@@ -69,6 +73,7 @@ void handleAdvancedHourlyEffect();
 void handleHourlyEffect(unsigned long currentMillis);
 void handleWeatherEffect(unsigned long currentMillis);
 void handleTransition(unsigned long currentMillis);
+void setupAP();
 
 // NTP服务器配置
 const char* ntpServer = "pool.ntp.org";
@@ -95,7 +100,7 @@ unsigned long specialEffectStart = 0;
 const unsigned long ENV_UPDATE_INTERVAL = 1000;
 bool showTimeMode = true;
 
-const unsigned long ENV_DISPLAY_DURATION = 15000;  // 环境显示持续3秒
+const unsigned long ENV_DISPLAY_DURATION = 8000;  // 环境显示持续3秒
 const float ENV_DISPLAY_PROBABILITY = 0.1;        // 修改为30%的概率切换到环境显示
 unsigned long envDisplayStartTime = 0;            // 环境显示开始时间
 bool forceTimeDisplay = true;                     // 强制时间显示标志
@@ -243,7 +248,7 @@ const unsigned long FRAME_INTERVAL = 100; // 动画帧更新间隔
 // 添加在全局变量区域
 int scrollPosition = 0;
 unsigned long lastScrollTime = 0;
-const unsigned long SCROLL_INTERVAL = 400; // 滚动间隔时间(ms)
+const unsigned long SCROLL_INTERVAL = 200; // 滚动间隔时间(ms)
 String envDataString = ""; // 用于存储环境数据的完整字符串
 
 // 添加亮度控制相关的常量
@@ -348,6 +353,24 @@ const HourlyEffect* currentHourlyEffect = nullptr;
 // 添加全局变量用于保存原始字符
 byte originalChars[4][8];  // 保存0-3号位置的原始字符
 
+// 添加看门狗超时时间定义
+#define WDT_TIMEOUT 15  // 改为15秒
+#define RESET_INTERVAL 43200000  // 改为12小时 = 12 * 60 * 60 * 1000 毫秒
+#define HEAP_CHECK_INTERVAL 60000 // 改为每1分钟检查一次内存
+
+// 添加全局变量
+unsigned long lastResetTime = 0;
+unsigned long lastHeapCheck = 0;
+unsigned long lastWiFiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 60000; // 每分钟检查一次WiFi状态
+
+// 添加新的内存阈值常量
+#define MIN_FREE_HEAP 20000  // 最小剩余堆内存(bytes)
+#define MIN_FREE_BLOCK 10000 // 最小剩余连续块(bytes)
+
+// 在全局变量区域添加环境数据缓冲区
+static char envBuffer[100];  // 添加静态缓冲区用于环境数据
+
 bool syncTimeFromNTP() {
   struct tm timeinfo;
   bool success = false;
@@ -413,14 +436,14 @@ bool syncTimeFromNTP() {
   // 断开WiFi连接
   WiFi.disconnect(true);
   
-  // 恢复之前的WiFi模式
+  // 恢复之前的WiFi��式
   WiFi.mode(currentMode);
   
   return success;
 }
 
 void setColor(int r, int g, int b, float intensity) {
-    // 应用全局亮度设置，但确保手动模式下颜色足够明显
+    // 应用全局亮度设置，但确保手��模�����������颜色足够明显
     float finalIntensity = intensity * (isManualColorControl ? MANUAL_MODE_BRIGHTNESS : currentBrightness);
     
     // 使用浮点数计算以提高精度
@@ -428,7 +451,7 @@ void setColor(int r, int g, int b, float intensity) {
     float fg = g * finalIntensity;
     float fb = b * finalIntensity;
     
-    // 确保值在有效范围内
+    // 确保值在���效范围内
     lcd.setPWM(lcd.REG_RED, constrain((int)fr, 0, 255));
     lcd.setPWM(lcd.REG_GREEN, constrain((int)fg, 0, 255));
     lcd.setPWM(lcd.REG_BLUE, constrain((int)fb, 0, 255));
@@ -748,21 +771,35 @@ void handleNotFound() {
   server.send(302, "text/plain", "");
 }
 void setupAP() {
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-
-  // 配置DNS服务器，将所有域名请求定向到ESP32
-  dnsServer.start(53, "*", apIP);
-
-  // 配置Web服务器路由
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/sync", HTTP_GET, handleTimeSync);
-  server.on("/scan-wifi", HTTP_GET, handleScanWiFi);  // 新����
-  server.on("/connect-wifi", HTTP_POST, handleConnectWiFi);  // 新增
-  server.onNotFound(handleNotFound);
-  
-  server.begin();
+    WiFi.disconnect(true);
+    delay(100);
+    
+    WiFi.mode(WIFI_AP);
+    int attempts = 0;
+    while(!WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0)) && attempts < 3) {
+        attempts++;
+        delay(100);
+    }
+    
+    attempts = 0;
+    while(!WiFi.softAP(AP_SSID, AP_PASSWORD) && attempts < 3) {
+        attempts++;
+        delay(100);
+    }
+    
+    // 配置DNS服务器
+    dnsServer.stop();
+    dnsServer.start(53, "*", apIP);
+    
+    // 配置Web服务器路由
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/sync", HTTP_GET, handleTimeSync);
+    server.on("/scan-wifi", HTTP_GET, handleScanWiFi);
+    server.on("/connect-wifi", HTTP_POST, handleConnectWiFi);
+    server.on("/set-color", HTTP_POST, handleSetColor);
+    server.onNotFound(handleNotFound);
+    
+    server.begin();
 }
 void adjustBrightness() {
   int lightIntensity = environment.getLuminousIntensity();
@@ -780,14 +817,34 @@ void adjustBrightness() {
 }
 
 void updateThemeColors(int hour) {
+  // 添加调试输出
+  static int lastTheme = -1;
+  int currentTheme;
+  
   if (hour >= 6 && hour < 11) {
     memcpy(currentThemeColors, MORNING_COLORS, sizeof(MORNING_COLORS));
+    currentTheme = 0;  // 早晨
   } else if (hour >= 11 && hour < 17) {
     memcpy(currentThemeColors, DAY_COLORS, sizeof(DAY_COLORS));
+    currentTheme = 1;  // 白天
   } else if (hour >= 17 && hour < 20) {
     memcpy(currentThemeColors, EVENING_COLORS, sizeof(EVENING_COLORS));
+    currentTheme = 2;  // 傍晚
   } else {
     memcpy(currentThemeColors, NIGHT_COLORS, sizeof(NIGHT_COLORS));
+    currentTheme = 3;  // 夜晚
+  }
+  
+  // 当主题发生变化时输出调试信息
+  if (currentTheme != lastTheme) {
+    Serial.printf("Theme changed at %02d:00 - ", hour);
+    switch(currentTheme) {
+      case 0: Serial.println("Morning theme"); break;
+      case 1: Serial.println("Day theme"); break;
+      case 2: Serial.println("Evening theme"); break;
+      case 3: Serial.println("Night theme"); break;
+    }
+    lastTheme = currentTheme;
   }
 }
 
@@ -832,7 +889,7 @@ void displayTime() {
     // 先清屏
     lcd.clear();
     
-    // 第一行：时钟图标和时间
+    // 第一行：���钟图标和时间
     lcd.setCursor(0, 0);
     lcd.write(byte(0));  // 时钟图标
     lcd.setCursor(2, 0);
@@ -859,39 +916,57 @@ void displayTime() {
 }
 
 void displayEnvironmental() {
+    static String lastDisplayStr = "";  // 添加静态变量保存上一次显示的内容
+    
     // 确保正确的字符设置
     if (!isHourlyEffect) {
         restoreOriginalChars();
     }
     
-    // 更新环境数据字符串
-    char tempStr[80];
-    float temp = environment.getTemperature(TEMP_C);
-    int humidity = (int)environment.getHumidity();
-    int light = (int)environment.getLuminousIntensity();
-    
-    // 检查数据有效性
-    if (isnan(temp) || humidity < 0 || humidity > 100 || light < 0) {
-        sprintf(tempStr, "Sensor Error!");
-    } else {
-        sprintf(tempStr, "  \1%.1fC  \2%d%%  \3%d lx  ", temp, humidity, light);
-    }
-    envDataString = String(tempStr);
-    
+    // 获取当前时间
     unsigned long currentMillis = millis();
+    
+    // 如果环境数据字符串为空或者需要更新数据
+    if (envDataString.isEmpty() || currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
+        float temp = environment.getTemperature(TEMP_C);
+        int humidity = (int)environment.getHumidity();
+        int light = (int)environment.getLuminousIntensity();
+        
+        // 检查数据有效性
+        if (isnan(temp) || humidity < 0 || humidity > 100 || light < 0) {
+            envDataString = "Sensor Error!";
+        } else {
+            char tempStr[80];
+            sprintf(tempStr, "  \1%.1fC  \2%d%%  \3%d lx  ", temp, humidity, light);
+            envDataString = String(tempStr);
+        }
+        lastEnvUpdate = currentMillis;
+    }
+    
+    // 即使未到滚动时间，也要确保显示内容
+    String displayStr;
     if (currentMillis - lastScrollTime >= SCROLL_INTERVAL) {
         lastScrollTime = currentMillis;
-        scrollPosition++;
-        if (scrollPosition >= envDataString.length()) {
-            scrollPosition = 0;
+        
+        if (envDataString.length() > 0) {
+            scrollPosition++;
+            if (scrollPosition >= envDataString.length()) {
+                scrollPosition = 0;
+            }
         }
         
-        // 清屏以防止残留
-        lcd.clear();
-        
-        // 准备显示字符串
-        String displayStr = envDataString.substring(scrollPosition);
+        // 更新显示字符串
+        displayStr = envDataString.substring(scrollPosition);
         displayStr += envDataString.substring(0, scrollPosition);
+        lastDisplayStr = displayStr;  // 保存当前显示内容
+    } else {
+        // 使用上一次的显示内容
+        displayStr = lastDisplayStr;
+    }
+    
+    // 只有当有内容要显示时才清屏
+    if (displayStr.length() > 0) {
+        lcd.clear();
         
         // 确保在两行都显示
         for (int row = 0; row < 2; row++) {
@@ -914,16 +989,33 @@ void displayEnvironmental() {
         }
     }
 }
-const struct {
-  int month;
-  int day;
-  const char* name;
-  const int colors[5][3];
-} HOLIDAYS[] = {
-  {1, 1, "New Year", {{255,0,0}, {255,215,0}, {255,255,255}, {255,192,203}, {255,69,0}}},
-  {12, 25, "Christmas", {{255,0,0}, {0,255,0}, {255,255,255}, {255,215,0}, {0,128,0}}},
-  // 可以添加更多节日
+
+// 首先定义节日结构体类型
+struct Holiday {
+    int month;
+    int day;
+    const char* name;
+    int colors[5][3];
 };
+
+// 然后定义节日数组
+const Holiday HOLIDAYS[] = {
+    {1, 1, "New Year", {{255,0,0}, {255,215,0}, {255,255,255}, {255,192,203}, {255,69,0}}},
+    {12, 25, "Christmas", {{255,0,0}, {0,255,0}, {255,255,255}, {255,215,0}, {0,128,0}}}
+    // 可以添加更多节日
+};
+
+// 检查是否是特殊节日
+bool checkHoliday(int& index) {
+    const int numHolidays = sizeof(HOLIDAYS) / sizeof(HOLIDAYS[0]);
+    for(int i = 0; i < numHolidays; i++) {
+        if(HOLIDAYS[i].month == rtc.month && HOLIDAYS[i].day == rtc.day) {
+            index = i;
+            return true;
+        }
+    }
+    return false;
+}
 
 // 新增天气效果相关变量
 float tempHue = 0.0;
@@ -965,16 +1057,6 @@ void hsvToRgb(float h, float s, float v, int* r, int* g, int* b) {
   *b = (bt + m) * 255;
 }
 
-// 检查是否是特殊节日
-bool checkHoliday(int& index) {
-  for(int i = 0; i < sizeof(HOLIDAYS)/sizeof(HOLIDAYS[0]); i++) {
-    if(HOLIDAYS[i].month == rtc.month && HOLIDAYS[i].day == rtc.day) {
-      index = i;
-      return true;
-    }
-  }
-  return false;
-}
 // New function to handle advanced hourly effects
 void handleAdvancedHourlyEffect() {
     unsigned long currentMillis = millis();
@@ -1093,13 +1175,16 @@ void handleTransition(unsigned long currentMillis) {
 // 修改 handleHourlyEffect 函数，提高特效的可见性
 void handleHourlyEffect(unsigned long currentMillis) {
     if (!isHourlyEffect || !currentHourlyEffect) {
+        Serial.println("Hourly effect not active or no effect selected");
         restoreOriginalChars();
         return;
     }
     
     unsigned long effectElapsed = currentMillis - hourlyEffectStart;
     if (effectElapsed >= currentHourlyEffect->duration) {
+        Serial.println("Hourly effect completed");
         isHourlyEffect = false;
+        forceTimeDisplay = false;
         restoreOriginalChars();
         return;
     }
@@ -1220,10 +1305,11 @@ void handleConnectWiFi() {
 
 // 添加恢复原始字符的函数
 void restoreOriginalChars() {
-    lcd.customSymbol(0, originalChars[0]);
-    lcd.customSymbol(1, originalChars[1]);
-    lcd.customSymbol(2, originalChars[2]);
-    lcd.customSymbol(3, originalChars[3]);
+    // 使用 customSymbol 方法恢复原始字符
+    lcd.customSymbol(0, originalChars[0]);  // 时钟图标
+    lcd.customSymbol(1, originalChars[1]);  // 温度计图标
+    lcd.customSymbol(2, originalChars[2]);  // 湿度图标
+    lcd.customSymbol(3, originalChars[3]);  // 光照图标
 }
 
 // 添加新的处理函数
@@ -1233,8 +1319,9 @@ void handleSetColor() {
         return;
     }
     
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    String data = server.arg("plain");
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, data);
     
     if (error) {
         server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
@@ -1318,7 +1405,7 @@ byte armsUp[8] = {
 
 // 添加开机动画函数
 void playBootAnimation() {
-    // 设置初始背光颜色为温暖的白色
+    // 设置初始背光颜色��温暖��白色
     setColor(255, 255, 200, 1.0);
     
     // 临时保存当前自定义字符
@@ -1412,8 +1499,18 @@ void playBootAnimation() {
     displayTime();
 }
 
-// 修改 setup 函数
+// 在全局变量区域添加
+bool isFirstBoot = true;  // 添加首次启动标志
+
+// 修改setup函数
 void setup() {
+    // 初始化看门狗
+    esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
+    esp_task_wdt_add(NULL); //add current thread to WDT watch
+    
+    // 初始化lastResetTime
+    lastResetTime = millis();  // 添加这一行
+    
     Serial.begin(115200);
     
     lcd.init();
@@ -1434,8 +1531,11 @@ void setup() {
     
     // 初始化RTC和环境传感器
     rtc.setup();
+     //手动设置RTC时钟
+      //rtc.adjustRtc(2024,12,24,2,12,59,45);
     rtc.read();
-    updateThemeColors(rtc.hour);  // 确保在播放动画前更新主题颜色
+    lastHour = rtc.hour;  // 初始化lastHour为当前小时
+    updateThemeColors(rtc.hour);
     
     while(environment.begin() != 0) {
         setColor(255, 50, 50, 1.0);  // 错误状态显示红色
@@ -1503,26 +1603,126 @@ void hsvToRgb(float h, float s, float v, int& r, int& g, int& b) {
     }
     
     r = (rf + m) * 255;
-    g = (gf + m) * 255;
-    b = (bf + m) * 255;
+    g = (gf + m) *255;
+    b = (bf + m) *255;
+}
+
+// 添加内存检查函数
+void checkHeapMemory() {
+    size_t freeHeap = esp_get_free_heap_size();
+    size_t maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    
+    // 如果可用内存或最大连续块太小,触发重启
+    if(freeHeap < MIN_FREE_HEAP || maxBlock < MIN_FREE_BLOCK) {
+        Serial.printf("Low memory! Free: %d, Max Block: %d\n", freeHeap, maxBlock);
+        ESP.restart();
+    }
+    
+    // 主动清理内存碎片 - 使用替代方法
+    if(maxBlock < (MIN_FREE_BLOCK * 2)) {
+        // 强制进行垃圾回收
+        heap_caps_check_integrity_all(true);
+    }
+}
+
+// 添加WiFi检查和恢复函数
+void checkAndRecoverWiFi() {
+    static uint8_t failCount = 0;
+    
+    if(WiFi.getMode() == WIFI_AP) {
+        if(WiFi.softAPgetStationNum() == 0) {
+            failCount++;
+            if(failCount >= 3) { // 连续3次检查都没有连接
+                WiFi.softAPdisconnect(true);
+                delay(100);
+                setupAP(); // 重新设置AP
+                failCount = 0;
+            }
+        } else {
+            failCount = 0;
+        }
+    }
+}
+
+// 在文件开头的函数声明区域添加（在全局变量定义之前）
+unsigned long getAdjustedMillis();  // 函数前向声明
+
+// 将getAdjustedMillis的实现移到loop函数之前
+unsigned long getAdjustedMillis() {
+    static unsigned long lastMillis = 0;
+    static unsigned long timeOffset = 0;
+    unsigned long currentMillis = millis();
+    
+    // 检测溢出
+    if(currentMillis < lastMillis) {
+        timeOffset += lastMillis;
+    }
+    lastMillis = currentMillis;
+    
+    return currentMillis + timeOffset;
 }
 
 void loop() {
-    unsigned long currentMillis = millis();
+    unsigned long currentMillis = getAdjustedMillis();
+    
+    // 喂狗
+    esp_task_wdt_reset();
+    
+    // 检查是否需要定期重置
+    if(currentMillis - lastResetTime >= RESET_INTERVAL) {
+        ESP.restart();
+        return;
+    }
+    
+    // 如果没有重启,则更新lastResetTime
+    if(currentMillis - lastResetTime >= RESET_INTERVAL/2) {  // 12小时更新一次计时器
+        lastResetTime = currentMillis;
+    }
+    
+    // 检查堆内存
+    if(currentMillis - lastHeapCheck >= HEAP_CHECK_INTERVAL) {
+        checkHeapMemory();
+        heap_caps_check_integrity_all(true);
+        lastHeapCheck = currentMillis;
+    }
+    
+    // 检查WiFi状态
+    if(currentMillis - lastWiFiCheck >= WIFI_CHECK_INTERVAL) {
+        checkAndRecoverWiFi();
+        lastWiFiCheck = currentMillis;
+    }
+    
+    // 优化DNS服务器处理
+    {
+        static unsigned long lastDnsCheck = 0;
+        const unsigned long DNS_CHECK_INTERVAL = 100; // 100ms检查一次DNS请求
+        
+        if(currentMillis - lastDnsCheck >= DNS_CHECK_INTERVAL) {
+            dnsServer.processNextRequest();
+            lastDnsCheck = currentMillis;
+        }
+    }
+    
+    // 优化Web服务器处理
+    {
+        static unsigned long lastWebCheck = 0;
+        const unsigned long WEB_CHECK_INTERVAL = 50; // 50ms处理一次Web请求
+        
+        if(currentMillis - lastWebCheck >= WEB_CHECK_INTERVAL) {
+            server.handleClient();
+            lastWebCheck = currentMillis;
+        }
+    }
     
     // 更新缓存的时间字符串
-    if (currentMillis - lastTimeUpdate >= 1000) {  // 每秒更新一次
+    if (currentMillis - lastTimeUpdate >= 1000) {
         rtc.read();
         snprintf(cachedTimeStr, sizeof(cachedTimeStr), "%02d:%02d:%02d", 
                 rtc.hour, rtc.minute, rtc.second);
         lastTimeUpdate = currentMillis;
     }
     
-    // 优先处理 Web 服务器请求
-    dnsServer.processNextRequest();
-    server.handleClient();
-    
-    // 处理颜色更新
+    // 处理颜色更新 - 使用非阻塞方式
     if (colorNeedsUpdate && (currentMillis - lastColorUpdate >= COLOR_UPDATE_INTERVAL)) {
         isManualColorControl = true;
         lastColorControlTime = currentMillis;
@@ -1537,57 +1737,119 @@ void loop() {
         colorNeedsUpdate = false;
     }
     
-    // 修改环境更新和显示逻辑
+    // 环境更新和显示逻辑
     if (currentMillis - lastEnvUpdate >= ENV_UPDATE_INTERVAL) {
-        lastEnvUpdate = currentMillis;
-        rtc.read();
+        static bool envUpdateInProgress = false;
         
-        // 添加主题颜色更新检查
-        if (rtc.hour != lastHour) {
-            updateThemeColors(rtc.hour);
-            lastHour = rtc.hour;
+        if(!envUpdateInProgress) {
+            envUpdateInProgress = true;
             
-            // 如果不在手动控制模式，立即开始向新主题颜色过渡
-            if (!isManualColorControl) {
-                memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
-                currentColor = 0;  // 重置为新主题的第一个颜色
-                memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
-                isTransitioning = true;
-                transitionStart = currentMillis;
-                lastColorChange = currentMillis;
-            }
-        }
-        
-        // 只在非整点特效时处理显示逻辑
-        if (!isHourlyEffect) {
-            if (showTimeMode && !forceTimeDisplay) {
-                if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
-                    showTimeMode = false;
-                    envDisplayStartTime = currentMillis;
-                    scrollPosition = 0;
-        envDataString = "";
-        lastScrollTime = currentMillis;
+            rtc.read();
+            
+            // 恢复整点特效检查
+            if (rtc.hour != lastHour && !isFirstBoot) {
+                updateThemeColors(rtc.hour);
+                lastHour = rtc.hour;
+                
+                // 触发整点特效
+                isHourlyEffect = true;
+                hourlyEffectStart = currentMillis;
+                hourlyEffectFrame = 0;
+                
+                // 根据时间段选择不同的特效
+                if (rtc.hour >= 6 && rtc.hour < 11) {
+                    currentHourlyEffect = &MORNING_EFFECT;
+                    Serial.println("Triggering morning effect");
+                } else if (rtc.hour >= 11 && rtc.hour < 17) {
+                    currentHourlyEffect = &DAY_EFFECT;
+                    Serial.println("Triggering day effect");
+                } else if (rtc.hour >= 17 && rtc.hour < 20) {
+                    currentHourlyEffect = &EVENING_EFFECT;
+                    Serial.println("Triggering evening effect");
+                } else {
+                    currentHourlyEffect = &NIGHT_EFFECT;
+                    Serial.println("Triggering night effect");
                 }
-            } else if (!showTimeMode) {
-                if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
-                    showTimeMode = true;
+                
+                // 强制显示特效
+                forceTimeDisplay = true;
+                
+                if (!isManualColorControl) {
+                    memcpy(oldColors, currentThemeColors[currentColor], sizeof(oldColors));
+                    currentColor = 0;
+                    memcpy(newColors, currentThemeColors[currentColor], sizeof(newColors));
+                    isTransitioning = true;
+                    transitionStart = currentMillis;
+                    lastColorChange = currentMillis;
                 }
             }
             
-            // 清除屏幕以防止内容重叠
-            lcd.clear();
+            if (isFirstBoot) {
+                isFirstBoot = false;
+                lastHour = rtc.hour;
+            }
             
-            if (showTimeMode) {
-                displayTime();
+            // 恢复环境数据显示逻辑
+            if (!isHourlyEffect) {
+                static bool transitioningToEnv = false;
+                
+                if (showTimeMode && !forceTimeDisplay) {
+                    if (random(100) < (ENV_DISPLAY_PROBABILITY * 100)) {
+                        float temp = environment.getTemperature(TEMP_C);
+                        int humidity = (int)environment.getHumidity();
+                        int light = (int)environment.getLuminousIntensity();
+                        
+                        if (isnan(temp) || humidity < 0 || humidity > 100 || light < 0) {
+                            strncpy(envBuffer, "Sensor Error!", sizeof(envBuffer)-1);
+                        } else {
+                            snprintf(envBuffer, sizeof(envBuffer), "  \1%.1fC  \2%d%%  \3%d lx  ", 
+                                    temp, humidity, light);
+                        }
+                        envDataString = String(envBuffer);
+                        
+                        if (envDataString.length() > 0) {
+                            showTimeMode = false;
+                            envDisplayStartTime = currentMillis;
+                            scrollPosition = 0;
+                            lastScrollTime = currentMillis - SCROLL_INTERVAL;
+                            transitioningToEnv = true;
+                        }
+                    }
+                } else if (!showTimeMode) {
+                    if (currentMillis - envDisplayStartTime >= ENV_DISPLAY_DURATION) {
+                        showTimeMode = true;
+                        transitioningToEnv = false;
+                    }
+                }
+                
+                if (transitioningToEnv || !showTimeMode) {
+                    displayEnvironmental();
+                } else {
+                    displayTime();
+                }
             } else {
-                displayEnvironmental();
+                handleHourlyEffect(currentMillis);
             }
-        } else {
-            // 如���是整点特效，调用整点特效处理函数
-            handleHourlyEffect(currentMillis);
+            
+            adjustBrightness();
+            envUpdateInProgress = false;
         }
         
-        adjustBrightness();
+        lastEnvUpdate = currentMillis;
+    }
+    
+    // 强制释放未使用的内存
+    if(currentMillis - lastHeapCheck >= HEAP_CHECK_INTERVAL) {
+        checkHeapMemory();
+        heap_caps_check_integrity_all(true);
+        lastHeapCheck = currentMillis;
+    }
+    
+    // 添加延时,避免CPU占用过高
+    static unsigned long lastYield = 0;
+    if(currentMillis - lastYield >= 50) { // 每50ms让出CPU
+        delay(1);
+        lastYield = currentMillis;
     }
     
     // Web 界面更新
@@ -1607,7 +1869,7 @@ void loop() {
         transitionStart = currentMillis;
     }
 
-    // 颜色���制逻辑
+    // 颜色制逻辑
     if (isManualColorControl) {
         // 手动控制模式下只更新颜色，不影响显示内容
         setColor(manualColors[0], manualColors[1], manualColors[2], MANUAL_MODE_BRIGHTNESS);
@@ -1652,14 +1914,14 @@ void loop() {
                     saturation = 0.8;
                     value = 0.8;
                 } else {
-                    // 白天保持正常饱和度和明度
+                    // 白天保正常饱和度和明度
                     saturation = 1.0;
                     value = 1.0;
                 }
                 
                 hsvToRgb(currentHue, saturation, value, r, g, b);
                 
-                // 应用颜色和呼吸效果
+                // 应用色和呼吸效果
                 setColor(r, g, b, breatheValue);
             }
             
@@ -1673,6 +1935,7 @@ void loop() {
                 hueSpeed = random(3, 10) / 10.0; // 0.3 到 1.0 之间
             }
         }
+
     }
 
     // 时间同步检查
