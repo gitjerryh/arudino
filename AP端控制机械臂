@@ -1,0 +1,811 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include <ArduinoJson.h>
+#include <cmath>
+
+// WiFi设置
+const char* ssid = "RoboticArm";  // AP名称
+const char* password = "12345678"; // AP密码
+
+// 创建Web服务器对象
+WebServer server(80);
+
+// ESP32的I2C引脚定义
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+// 舵机参数定义
+#define SERVOMIN  150 
+#define SERVOMAX  600 
+#define SERVO_FREQ 50 
+
+// 定义舵机引脚
+#define PIN_HAND        11
+#define PIN_WRIST       12
+#define PIN_ELBOW       13
+#define PIN_SHOULDER    14
+#define PIN_BASE        15
+
+// 创建舵机通道数组
+const uint8_t SERVO_PINS[] = {PIN_HAND, PIN_WRIST, PIN_ELBOW, PIN_SHOULDER, PIN_BASE};
+const uint8_t SERVO_COUNT = sizeof(SERVO_PINS) / sizeof(SERVO_PINS[0]);
+
+// 添加舵机名称数组，便于调试
+const char* SERVO_NAMES[] = {"手部", "手腕", "肘部", "肩部", "底座"};
+
+// 创建PWM驱动对象
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
+
+// 添加速度控制参数
+struct ServoConfig {
+    uint8_t min;
+    uint8_t max;
+    uint8_t stepDelay;    // 每步延时(ms)
+    float stepSize;       // 每次移动的角度
+    float acceleration;   // 加速度参数
+    float maxSpeed;       // 最大速度限制
+    float startSpeed;     // 起始速度
+};
+
+// 为每个舵机定义具体参数
+const ServoConfig SERVO_CONFIGS[] = {
+    //min, max, delay, stepSize, accel, maxSpeed, startSpeed
+    {0, 180, 15, 0.5, 0.02, 2.0, 0.3},    // 手部：较快
+    {0, 180, 20, 0.5, 0.02, 1.8, 0.3},    // 手腕：中等
+    {30, 150, 25, 0.4, 0.015, 1.2, 0.2},  // 肘部：较慢
+    {30, 150, 20, 0.3, 0.012, 1.0, 0.15}, // 肩部：优化后的参数
+    {0, 180, 25, 0.5, 0.02, 1.5, 0.3}     // 底座：中等
+};
+
+// 运动状态和控制变量
+bool isMoving = false;
+String currentMovingServo = "";
+bool shouldCancelMovement = false;
+
+// 添加运动控制变量
+volatile bool isMovingServos = false;
+unsigned long lastMoveTime = 0;
+const unsigned long MOVE_TIMEOUT = 5000; // 5秒超时
+
+// 添加数据结构定义到全局区域
+struct MoveData {
+    float targets[5];
+    float currents[5];
+};
+
+// 函数声明
+uint16_t angleToPWM(uint8_t angle);
+float sCurveInterpolation(float start, float end, float t);
+void moveServoSmooth(uint8_t servoIndex, float targetAngle, float currentAngle);
+void returnToCenter();
+void handleRoot();
+void handleServo();
+void handleSavePositions();
+void handleLoadPositions();
+void handleCenter();
+void handleCancelMovement();
+void handleStatus();
+
+// HTML页面
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>机械臂控制系统</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 1rem;
+            margin-bottom: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header h1 {
+            font-size: 1.8rem;
+            margin: 0;
+        }
+        .control-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 2rem;
+        }
+        .servo-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .servo-card h3 {
+            color: #2c3e50;
+            margin-bottom: 1rem;
+            font-size: 1.2rem;
+        }
+        .slider-container {
+            margin-bottom: 1rem;
+        }
+        .slider {
+            width: 100%;
+            height: 8px;
+            -webkit-appearance: none;
+            background: #e0e0e0;
+            border-radius: 4px;
+            outline: none;
+        }
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #3498db;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: background .2s;
+        }
+        .slider::-webkit-slider-thumb:hover {
+            background: #2980b9;
+        }
+        .value {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.9rem;
+            margin-top: 8px;
+        }
+        .preset-panel {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+        .preset-buttons {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        .preset-btn {
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            background: #3498db;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .preset-btn:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+        }
+        .preset-btn.save { background: #27ae60; }
+        .preset-btn.save:hover { background: #219a52; }
+        .preset-btn.load { background: #e67e22; }
+        .preset-btn.load:hover { background: #d35400; }
+        
+        .status-panel {
+            background: white;
+            padding: 1rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #2ecc71;
+        }
+        .status-dot.moving { background: #e74c3c; }
+        
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+            .header { margin-bottom: 1rem; }
+            .preset-buttons { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>机械臂控制系统</h1>
+        </div>
+
+        <div class="status-panel">
+            <div class="status-indicator">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="movement-status">系统就绪</span>
+            </div>
+            <span id="connection-status">已连接</span>
+        </div>
+
+        <div class="preset-panel">
+            <div class="preset-buttons">
+                <button class="preset-btn" onclick="setPreset('home')">初始位置</button>
+                <button class="preset-btn" onclick="setPreset('center')">居中位置</button>
+                <button class="preset-btn save" onclick="saveCurrentPos()">保存位置</button>
+                <button class="preset-btn load" onclick="loadSavedPos()">加载位置</button>
+            </div>
+        </div>
+
+        <div class="control-panel">
+            <div class="servo-card">
+                <h3>手部舵机</h3>
+                <div class="slider-container">
+                    <input type="range" min="0" max="180" value="90" class="slider" id="hand" 
+                           oninput="updateServo('hand', this.value)">
+                    <div class="value" id="hand-value">90°</div>
+                </div>
+            </div>
+
+            <div class="servo-card">
+                <h3>手腕舵机</h3>
+                <div class="slider-container">
+                    <input type="range" min="0" max="180" value="90" class="slider" id="wrist"
+                           oninput="updateServo('wrist', this.value)">
+                    <div class="value" id="wrist-value">90°</div>
+                </div>
+            </div>
+
+            <div class="servo-card">
+                <h3>肘部舵机</h3>
+                <div class="slider-container">
+                    <input type="range" min="0" max="180" value="90" class="slider" id="elbow"
+                           oninput="updateServo('elbow', this.value)">
+                    <div class="value" id="elbow-value">90°</div>
+                </div>
+            </div>
+
+            <div class="servo-card">
+                <h3>肩部舵机</h3>
+                <div class="slider-container">
+                    <input type="range" min="0" max="180" value="90" class="slider" id="shoulder"
+                           oninput="updateServo('shoulder', this.value)">
+                    <div class="value" id="shoulder-value">90°</div>
+                </div>
+            </div>
+
+            <div class="servo-card">
+                <h3>底座舵机</h3>
+                <div class="slider-container">
+                    <input type="range" min="0" max="180" value="90" class="slider" id="base"
+                           oninput="updateServo('base', this.value)">
+                    <div class="value" id="base-value">90°</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let savedPositions = {};
+        
+        function updateServo(servo, angle) {
+            document.getElementById(servo + '-value').innerHTML = angle + '°';
+            var xhr = new XMLHttpRequest();
+            var currentAngle = document.getElementById(servo).value;
+            xhr.open('GET', `/servo?name=${servo}&angle=${angle}&current=${currentAngle}`, true);
+            xhr.send();
+            
+            // 更新状态指示
+            document.getElementById('status-dot').classList.add('moving');
+            document.getElementById('movement-status').textContent = '正在移动: ' + 
+                {'hand': '手部', 'wrist': '手腕', 'elbow': '肘部', 'shoulder': '肩部', 'base': '底座'}[servo];
+            
+            // 2秒后恢复状态
+            setTimeout(() => {
+                document.getElementById('status-dot').classList.remove('moving');
+                document.getElementById('movement-status').textContent = '系统就绪';
+            }, 2000);
+        }
+        
+        function setPreset(preset) {
+            if (preset === 'home' || preset === 'center') {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '/center', true);
+                xhr.send();
+                
+                document.getElementById('status-dot').classList.add('moving');
+                document.getElementById('movement-status').textContent = '正在回到' + 
+                    (preset === 'home' ? '初始' : '居中') + '位置';
+                
+                setTimeout(() => {
+                    const servos = ['hand', 'wrist', 'elbow', 'shoulder', 'base'];
+                    servos.forEach(servo => {
+                        document.getElementById(servo).value = 90;
+                        document.getElementById(servo + '-value').innerHTML = '90°';
+                    });
+                    document.getElementById('status-dot').classList.remove('moving');
+                    document.getElementById('movement-status').textContent = '系统就绪';
+                }, 5000);
+            }
+        }
+        
+        function saveCurrentPos() {
+            savedPositions = {
+                hand: document.getElementById('hand').value,
+                wrist: document.getElementById('wrist').value,
+                elbow: document.getElementById('elbow').value,
+                shoulder: document.getElementById('shoulder').value,
+                base: document.getElementById('base').value
+            };
+            
+            fetch('/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(savedPositions)
+            })
+            .then(response => {
+                if (response.ok) {
+                    showNotification('位置已保存!', 'success');
+                } else {
+                    showNotification('保存失败!', 'error');
+                }
+            })
+            .catch(error => {
+                showNotification('保存错误: ' + error, 'error');
+            });
+        }
+        
+        function loadSavedPos() {
+            fetch('/load')
+            .then(response => response.json())
+            .then(positions => {
+                if (Object.keys(positions).length === 0) {
+                    showNotification('没有保存的位置!', 'warning');
+                    return;
+                }
+                for (let servo in positions) {
+                    document.getElementById(servo).value = positions[servo];
+                    updateServo(servo, positions[servo]);
+                }
+                showNotification('位置已加载!', 'success');
+            })
+            .catch(error => {
+                showNotification('加载错误: ' + error, 'error');
+            });
+        }
+        
+        function showNotification(message, type) {
+            const statusElement = document.getElementById('movement-status');
+            const dotElement = document.getElementById('status-dot');
+            
+            statusElement.textContent = message;
+            dotElement.style.background = {
+                success: '#2ecc71',
+                error: '#e74c3c',
+                warning: '#f1c40f'
+            }[type];
+            
+            setTimeout(() => {
+                statusElement.textContent = '系统就绪';
+                dotElement.style.background = '#2ecc71';
+            }, 2000);
+        }
+        
+        // 检查连接状态
+        setInterval(() => {
+            fetch('/status')
+            .catch(() => {
+                document.getElementById('connection-status').textContent = '连接断开';
+                document.getElementById('connection-status').style.color = '#e74c3c';
+            });
+        }, 5000);
+    </script>
+</body>
+</html>
+)rawliteral";
+
+// 将S型曲线插值函数的实现移到moveServoSmooth函数之前
+float sCurveInterpolation(float start, float end, float t) {
+    float x = (t - 0.5) * 6.0;
+    float sigmoid = 1.0 / (1.0 + exp(-x));
+    return start + (end - start) * sigmoid;
+}
+
+// 函数实现部分
+void moveServoSmooth(uint8_t servoIndex, float targetAngle, float currentAngle) {
+    const ServoConfig& config = SERVO_CONFIGS[servoIndex];
+    float angle = currentAngle;
+    
+    if (currentAngle < 0) {
+        angle = 90.0;
+    }
+    
+    // 确保目标角度在有效范围内
+    targetAngle = constrain(targetAngle, config.min, config.max);
+    
+    // 计算总路程和方向
+    float totalDistance = abs(targetAngle - angle);
+    float direction = (targetAngle > angle) ? 1.0 : -1.0;
+    
+    // 初始化运动参数
+    float currentSpeed = config.startSpeed;
+    float currentAccel = config.acceleration;
+    float distanceTraveled = 0.0;
+    
+    // 计算加速和减速点
+    float accelDist = totalDistance * 0.35;
+    float decelDist = totalDistance * 0.35;
+    
+    // 特别处理肩部舵机
+    if (servoIndex == 3) {
+        accelDist = totalDistance * 0.35;  // 缩短加速段
+        decelDist = totalDistance * 0.35;  // 缩短减速段
+        currentSpeed *= 0.9;               // 提高初始速度
+        currentAccel *= 0.8;               // 提高加速度
+    }
+    
+    while (abs(angle - targetAngle) > 0.1) {
+        // 计算当前位置在总行程中的比例
+        float progress = distanceTraveled / totalDistance;
+        
+        // 使用S型曲线调整速度
+        float speedMultiplier = sCurveInterpolation(0.5, 1.0, progress);
+        
+        // 根据位置调整速度
+        if (distanceTraveled < accelDist) {
+            currentSpeed = min(currentSpeed + currentAccel, config.maxSpeed);
+        } else if (distanceTraveled > (totalDistance - decelDist)) {
+            currentSpeed = max(currentSpeed - currentAccel, config.startSpeed);
+        }
+        
+        // 应用S型曲线
+        float step = currentSpeed * direction * speedMultiplier;
+        
+        // 修改肩部舵机特殊处理
+        if (servoIndex == 3) {
+            if (abs(angle - targetAngle) < 10) {
+                step *= 0.6;  // 减小减速幅度
+            }
+            if (totalDistance > 30) {
+                step *= 0.8;  // 增加大角度移动时的速度
+            }
+        }
+        
+        // 更新角度
+        angle += step;
+        angle = constrain(angle, config.min, config.max);
+        
+        // 设置PWM
+        uint16_t pulseLen = angleToPWM(static_cast<uint8_t>(angle));
+        pwm.setPWM(SERVO_PINS[servoIndex], 0, pulseLen);
+        
+        // 修改延时计算
+        float delayMultiplier = 1.0;
+        if (servoIndex == 3) {
+            delayMultiplier = 1.0 + (1.0 - speedMultiplier) * 0.3; // 减小延时增加幅度
+            if (progress < 0.1 || progress > 0.9) {
+                delayMultiplier *= 1.2;  // 减小起始和结束时的延时
+            }
+            if (totalDistance > 45) {
+                delayMultiplier *= 1.1;  // 减小大角度移动时的延时
+            }
+        }
+        
+        delay(static_cast<unsigned int>(config.stepDelay * delayMultiplier));
+        
+        distanceTraveled = abs(angle - currentAngle);
+    }
+    
+    // 修改最后的微调
+    if (!shouldCancelMovement) {
+        if (servoIndex == 3) {
+            delay(config.stepDelay * 2); // 减少额外等待时间
+        }
+        pwm.setPWM(SERVO_PINS[servoIndex], 0, angleToPWM(static_cast<uint8_t>(targetAngle)));
+        delay(config.stepDelay);
+    }
+}
+
+uint16_t angleToPWM(uint8_t angle) {
+    return map(angle, 0, 180, SERVOMIN, SERVOMAX);
+}
+
+// 添加位置保存函数
+void savePositionsToFlash(const char* positions) {
+    if (SPIFFS.exists("/servo_positions.json")) {
+        SPIFFS.remove("/servo_positions.json");  // 先删除旧文件
+    }
+    
+    File file = SPIFFS.open("/servo_positions.json", "w");
+    if(!file) {
+        Serial.println("Failed to open file for writing");
+        return;
+    }
+    
+    if (file.print(positions)) {
+        Serial.println("File written successfully");
+    } else {
+        Serial.println("Write failed");
+    }
+    file.close();
+}
+
+// 添加位置读取函数
+String loadPositionsFromFlash() {
+    File file = SPIFFS.open("/servo_positions.json", "r");
+    if(!file) {
+        Serial.println("Failed to open file for reading");
+        return "{}";
+    }
+    String positions = file.readString();
+    file.close();
+    return positions;
+}
+
+void handleRoot() {
+    server.send(200, "text/html", index_html);
+}
+
+void handleServo() {
+    String servo = server.arg("name");
+    float targetAngle = server.arg("angle").toFloat();
+    int servoIndex = -1;
+    
+    // 获取舵机索引
+    if (servo == "hand") servoIndex = 0;
+    else if (servo == "wrist") servoIndex = 1;
+    else if (servo == "elbow") servoIndex = 2;
+    else if (servo == "shoulder") servoIndex = 3;
+    else if (servo == "base") servoIndex = 4;
+    else {
+        server.send(400, "text/plain", "Invalid servo name");
+        return;
+    }
+    
+    // 检查角度范围
+    const ServoConfig& config = SERVO_CONFIGS[servoIndex];
+    if (targetAngle < config.min || targetAngle > config.max) {
+        server.send(400, "text/plain", "Angle out of range");
+        return;
+    }
+    
+    // 获取当前角度（从HTML滑动条的值）
+    float currentAngle = server.hasArg("current") ? 
+                        server.arg("current").toFloat() : 90.0;
+    
+    // 平滑移动到目标位置
+    moveServoSmooth(servoIndex, targetAngle, currentAngle);
+    
+    server.send(200, "text/plain", "OK");
+}
+
+// 添加保存位置的处理函数
+void handleSavePositions() {
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "No data received");
+        return;
+    }
+    
+    String positions = server.arg("plain");
+    Serial.println("Received positions to save: " + positions);
+    
+    // 验证JSON格式
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, positions);
+    if (error) {
+        Serial.println("Failed to parse JSON");
+        server.send(400, "text/plain", "Invalid JSON format");
+        return;
+    }
+    
+    savePositionsToFlash(positions.c_str());
+    server.send(200, "text/plain", "Positions saved");
+}
+
+// 添加位置计算辅助函数
+struct ServoMove {
+    uint8_t index;
+    float distance;
+    float targetAngle;
+};
+
+// 修改handleLoadPositions函数
+void handleLoadPositions() {
+    if (isMovingServos) {
+        server.send(409, "text/plain", "System is busy");
+        return;
+    }
+    
+    String positions = loadPositionsFromFlash();
+    Serial.println("Loaded positions: " + positions);
+    
+    if (positions == "{}") {
+        server.send(404, "text/plain", "No saved positions found");
+        return;
+    }
+    
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, positions);
+    
+    if (error) {
+        Serial.println("Failed to parse positions");
+        server.send(400, "text/plain", "Invalid saved positions");
+        return;
+    }
+    
+    // 先发送响应
+    server.send(200, "application/json", positions);
+    
+    isMovingServos = true;
+    lastMoveTime = millis();
+    
+    // 创建一个动态分配的MoveData对象
+    MoveData* moveData = new MoveData();
+    
+    // 获取当前位置和目标位置
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        const char* servoNames[] = {"hand", "wrist", "elbow", "shoulder", "base"};
+        moveData->targets[i] = doc[servoNames[i]].as<float>();
+        // 获取当前位置（从PWM值反推角度）
+        uint16_t currentPWM = pwm.getPWM(SERVO_PINS[i]);
+        moveData->currents[i] = map(currentPWM, SERVOMIN, SERVOMAX, 0, 180);
+    }
+    
+    // 使用任务来处理舵机移动
+    xTaskCreate(
+        [](void* parameter) {
+            MoveData* data = (MoveData*)parameter;
+            
+            // 先移动除了肩部和底座以外的舵机
+            for (int i = 0; i < SERVO_COUNT; i++) {
+                if (i != 3 && i != 4) { // 不是肩部和底座
+                    uint16_t targetPWM = angleToPWM(static_cast<uint8_t>(data->targets[i]));
+                    pwm.setPWM(SERVO_PINS[i], 0, targetPWM);
+                }
+            }
+            
+            // 移动肩部舵机
+            moveServoSmooth(3, data->targets[3], data->currents[3]);
+            
+            // 最后移动底座舵机
+            uint16_t targetPWM = angleToPWM(static_cast<uint8_t>(data->targets[4]));
+            pwm.setPWM(SERVO_PINS[4], 0, targetPWM);
+            
+            // 清理内存
+            delete data;
+            isMovingServos = false;
+            vTaskDelete(NULL);
+        },
+        "servo_move",
+        4096,
+        moveData,
+        1,
+        NULL
+    );
+}
+
+// 修改状态处理函数
+void handleStatus() {
+    // 检查移动是否超时
+    if (isMovingServos && (millis() - lastMoveTime > MOVE_TIMEOUT)) {
+        isMovingServos = false;
+    }
+    
+    JsonDocument doc;
+    doc["isMoving"] = isMovingServos;
+    doc["currentServo"] = currentMovingServo;
+    
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+// 添加顺序回中函数
+void returnToCenter() {
+    const float centerAngle = 90.0;
+    // 从上到下依次移动
+    const uint8_t moveOrder[] = {0, 1, 2, 3, 4}; // 手部->手腕->肘部->肩部->底座
+    
+    for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+        uint8_t servoIndex = moveOrder[i];
+        Serial.printf("移动%s到中心位置...\n", SERVO_NAMES[servoIndex]);
+        
+        // 获取当前位置
+        float currentAngle = 90.0; // 默认值
+        String servoName;
+        switch(servoIndex) {
+            case 0: servoName = "hand"; break;
+            case 1: servoName = "wrist"; break;
+            case 2: servoName = "elbow"; break;
+            case 3: servoName = "shoulder"; break;
+            case 4: servoName = "base"; break;
+        }
+        
+        moveServoSmooth(servoIndex, centerAngle, currentAngle);
+        
+        // 根据舵机类型调整等待时间
+        if (servoIndex == 2 || servoIndex == 3) {
+            delay(500); // 肘部和肩部之间等待更长时间
+        } else {
+            delay(200);
+        }
+    }
+}
+
+// 添加回中处理函数
+void handleCenter() {
+    returnToCenter();
+    server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\n=== 机械臂Web控制系统 ===");
+
+    // 初始化SPIFFS
+    if(!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS初始化失败!");
+        return;
+    }
+    Serial.println("SPIFFS初始化成功");
+
+    // 初始化WiFi AP
+    WiFi.softAP(ssid, password);
+    Serial.println("WiFi AP已启动");
+    Serial.print("IP地址: ");
+    Serial.println(WiFi.softAPIP());
+
+    // 初始化I2C和PWM驱动
+    Wire.begin(I2C_SDA, I2C_SCL, 100000);
+    pwm.begin();
+    pwm.setPWMFreq(SERVO_FREQ);
+
+    // 设置Web服务器路由
+    server.on("/", handleRoot);
+    server.on("/servo", handleServo);
+    server.on("/save", HTTP_POST, handleSavePositions);
+    server.on("/load", HTTP_GET, handleLoadPositions);
+    server.on("/center", handleCenter);
+    server.begin();
+    Serial.println("HTTP服务器已启动");
+
+    // 初始化所有舵机到中间位置
+    uint16_t middlePos = angleToPWM(90);
+    for(uint8_t i = 0; i < SERVO_COUNT; i++) {
+        pwm.setPWM(SERVO_PINS[i], 0, middlePos);
+        delay(100);
+    }
+    
+    Serial.println("系统初始化完成!");
+}
+
+void loop() {
+    server.handleClient();
+    
+    // 检查移动是否超时
+    if (isMovingServos && (millis() - lastMoveTime > MOVE_TIMEOUT)) {
+        isMovingServos = false;
+    }
+}
