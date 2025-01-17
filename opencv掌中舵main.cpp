@@ -1,3 +1,15 @@
+[env:esp32-s3-devkitc-1]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+    madhephaestus/ESP32Servo @ ^0.13.0
+
+build_flags = 
+    -DCORE_DEBUG_LEVEL=5
+
+
 #include <Arduino.h>
 #include <ESP32Servo.h>
 
