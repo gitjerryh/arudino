@@ -1,3 +1,20 @@
+
+[env:seeed_xiao_esp32c3]
+platform = espressif32
+board = seeed_xiao_esp32c3
+framework = arduino
+build_flags = 
+    -DCORE_DEBUG_LEVEL=1
+    -DCONFIG_ARDUHAL_LOG_DEFAULT_LEVEL=1
+    -DCONFIG_ASYNC_TCP_USE_WDT=0
+lib_deps = 
+	esphome/ESPAsyncWebServer-esphome@^3.3.0
+	olikraus/U8g2@^2.36.2
+	tzapu/WiFiManager@^2.0.17
+	bblanchon/ArduinoJson@^7.2.1
+
+
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
