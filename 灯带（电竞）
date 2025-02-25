@@ -1,0 +1,122 @@
+#include <Adafruit_NeoPixel.h>
+
+#define PIN 3 // 连接到数据引脚的引脚号
+#define NUM_LEDS 60 // LED数量
+
+Adafruit_NeoPixel strip(NUM_LEDS, PIN, NEO_GRB + NEO_KHZ800);
+
+// 函数声明
+void setStripColor(int red, int green, int blue);
+
+void dynamicFlowingGradient();
+
+void setup() {
+    strip.begin();
+    strip.show(); // 初始化所有LED为关闭状态
+}
+
+void loop() {
+
+    dynamicFlowingGradient();//动态渐变流光效果
+}
+
+// 设置LED条的颜色和亮度
+void setStripColor(int red, int green, int blue) {
+    for (int i = 0; i < strip.numPixels(); i++) {
+        strip.setPixelColor(i, strip.Color(red, green, blue));
+    }
+    strip.show();
+}
+
+// 动态渐变流光效果 + 电竞脉冲效果
+void dynamicFlowingGradient() {
+    static uint16_t startHue = 0;
+    static float flowOffset = 0.0;
+    static float satOffset = 0.0;
+    static float pulseOffset = 0.0; // 脉冲效果的偏移量
+    static int flashCounter = 0; // 闪烁计数器
+    
+    // 计算脉冲效果（全局亮度调制）
+    float pulseEffect = pow(sin(pulseOffset) * 0.5 + 0.5, 2); // 使用平方使脉冲更加明显
+    
+    // 控制闪烁效果的频率
+    flashCounter++;
+    bool flashActive = false;
+    if (flashCounter > 200 && flashCounter < 205) { // 每200帧闪烁5帧
+        flashActive = true;
+    } else if (flashCounter > 210 && flashCounter < 215) { // 再次闪烁
+        flashActive = true;
+    }
+    if (flashCounter >= 400) flashCounter = 0; // 重置计数器
+    
+    // 创建动态渐变效果
+    for (int i = 0; i < strip.numPixels(); i++) {
+        // 计算多层色相值
+        uint16_t baseHue = startHue + (i * 65536L / strip.numPixels() / 2);
+        uint16_t secondHue = (baseHue + 21845) & 65535; // 添加120度相位差
+        
+        // 创建多层流动的亮度波浪
+        float brightness1 = sin((i / 5.0) + flowOffset) * 0.3;
+        float brightness2 = sin((i / 7.0) - flowOffset * 1.5) * 0.2;
+        float brightness3 = sin((i / 3.0) + flowOffset * 0.7) * 0.15;
+        float finalBrightness = (brightness1 + brightness2 + brightness3) + 0.5; // 降低基础亮度
+        
+        // 应用脉冲效果 - 增加周期性的亮度变化
+        finalBrightness = finalBrightness * (0.7 + pulseEffect * 0.3); // 在70-100%之间脉动
+        
+        // 限制亮度范围在0.0到1.0之间
+        finalBrightness = max(0.0f, min(1.0f, finalBrightness));
+        
+        // 动态饱和度
+        float saturationWave = sin((i / 8.0) + satOffset) * 0.3 + 0.7; // 增加饱和度
+        uint8_t saturation = saturationWave * 255;
+        
+        // 将亮度值映射到0-255范围，并根据脉冲效果动态调整最大亮度
+        uint8_t value = finalBrightness * (80 + pulseEffect * 60); // 将最大亮度在80-140之间脉动
+        
+        // 混合两个色相 - 电竞风格，更强烈的色相对比
+        // 使用正弦函数创建更强烈的色相变化，倾向于红蓝对比
+        float gamingRatio = pow(sin((i / 15.0) + flowOffset * 1.2) * 0.5 + 0.5, 1.5); // 使用幂函数增强对比
+        uint16_t finalHue;
+        
+        if (gamingRatio > 0.7) {
+            // 红色系
+            finalHue = 0 + sin((i / 20.0) - flowOffset) * 5000; // 红色附近
+            saturation = 255; // 全饱和
+        } else if (gamingRatio < 0.3) {
+            // 蓝色系
+            finalHue = 43690 + sin((i / 20.0) + flowOffset) * 5000; // 蓝色附近
+            saturation = 255; // 全饱和
+        } else {
+            // 过渡区域 - 使用原来的色相混合
+            finalHue = baseHue * (sin((i / 10.0) + flowOffset) * 0.5 + 0.5) + 
+                      secondHue * (1 - (sin((i / 10.0) + flowOffset) * 0.5 + 0.5));
+        }
+        
+        // 添加闪烁效果 - 定时的整体闪烁，模拟电竞特效
+        if (flashActive) {
+            // 创建白色闪烁效果
+            value = 200; // 高亮度
+            saturation = 100; // 低饱和度，接近白色
+        }
+        
+        // 设置LED颜色
+        strip.setPixelColor(i, strip.ColorHSV(finalHue, saturation, value));
+    }
+    
+    strip.show();
+    
+    // 根据是否处于闪烁状态来调整动画速度
+    if (flashActive) {
+        startHue += 200;  // 闪烁时加快色相变化
+        flowOffset += 0.1; // 闪烁时加快流动
+        delay(15); // 闪烁时加快整体动画
+    } else {
+        startHue += 100;  // 正常色相变化速度
+        flowOffset += 0.06; // 正常流动速度
+        delay(18); // 正常动画速度
+    }
+    
+    satOffset += 0.03; // 控制饱和度变化速度
+    pulseOffset += 0.03; // 控制脉冲速度
+}
