@@ -7,7 +7,7 @@ Adafruit_NeoPixel strip(NUM_LEDS, PIN, NEO_GRB + NEO_KHZ800);
 
 // 函数声明
 void setStripColor(int red, int green, int blue);
-
+void dynamicMovieAtmosphere();
 void dynamicFlowingGradient();
 
 void setup() {
@@ -16,7 +16,7 @@ void setup() {
 }
 
 void loop() {
-
+    //dynamicMovieAtmosphere(); // 调用电影氛围灯效果
     dynamicFlowingGradient();//动态渐变流光效果
 }
 
@@ -28,26 +28,50 @@ void setStripColor(int red, int green, int blue) {
     strip.show();
 }
 
+// 动态电影氛围灯效果
+void dynamicMovieAtmosphere() {
+    static uint16_t startHue = 0;
+    static float flowOffset = 0.0;
+    static float pulseOffset = 0.0; // 脉冲效果的偏移量
+
+    // 计算脉冲效果（全局亮度调制）
+    float pulseEffect = pow(sin(pulseOffset) * 0.5 + 0.5, 2); // 使用平方使脉冲更加明显
+
+    // 创建动态渐变效果
+    for (int i = 0; i < strip.numPixels(); i++) {
+        // 计算色相值，使用柔和的色彩变化
+        uint16_t hue = (startHue + (i * 65536L / strip.numPixels())) & 65535; // 计算每个LED的色相
+
+        // 创建流动的亮度波浪
+        float brightness = sin((i / 10.0) + flowOffset) * 0.5 + 0.5; // 亮度在0到1之间变化
+        brightness = brightness * (0.5 + pulseEffect * 0.5); // 应用脉冲效果，亮度在50%-100%之间变化
+
+        // 将亮度值映射到0-255范围
+        uint8_t value = brightness * 255; // 将亮度值映射到255
+
+        // 设置LED颜色，使用HSV色彩空间
+        strip.setPixelColor(i, strip.ColorHSV(hue, 255, value)); // 全饱和度，动态亮度
+    }
+
+    strip.show();
+
+    // 更新动画参数
+    startHue += 1;  // 色相变化速度
+    flowOffset += 0.05; // 流动速度
+    pulseOffset += 0.1; // 脉冲速度
+
+    delay(20); // 控制整体动画速度
+}
+
 // 动态渐变流光效果 + 电竞脉冲效果
 void dynamicFlowingGradient() {
     static uint16_t startHue = 0;
     static float flowOffset = 0.0;
     static float satOffset = 0.0;
     static float pulseOffset = 0.0; // 脉冲效果的偏移量
-    static int flashCounter = 0; // 闪烁计数器
     
     // 计算脉冲效果（全局亮度调制）
     float pulseEffect = pow(sin(pulseOffset) * 0.5 + 0.5, 2); // 使用平方使脉冲更加明显
-    
-    // 控制闪烁效果的频率
-    flashCounter++;
-    bool flashActive = false;
-    if (flashCounter > 200 && flashCounter < 205) { // 每200帧闪烁5帧
-        flashActive = true;
-    } else if (flashCounter > 210 && flashCounter < 215) { // 再次闪烁
-        flashActive = true;
-    }
-    if (flashCounter >= 400) flashCounter = 0; // 重置计数器
     
     // 创建动态渐变效果
     for (int i = 0; i < strip.numPixels(); i++) {
@@ -59,7 +83,7 @@ void dynamicFlowingGradient() {
         float brightness1 = sin((i / 5.0) + flowOffset) * 0.3;
         float brightness2 = sin((i / 7.0) - flowOffset * 1.5) * 0.2;
         float brightness3 = sin((i / 3.0) + flowOffset * 0.7) * 0.15;
-        float finalBrightness = (brightness1 + brightness2 + brightness3) + 0.5; // 降低基础亮度
+        float finalBrightness = (brightness1 + brightness2 + brightness3) + 0.6; // 降低基础亮度
         
         // 应用脉冲效果 - 增加周期性的亮度变化
         finalBrightness = finalBrightness * (0.7 + pulseEffect * 0.3); // 在70-100%之间脉动
@@ -93,30 +117,17 @@ void dynamicFlowingGradient() {
                       secondHue * (1 - (sin((i / 10.0) + flowOffset) * 0.5 + 0.5));
         }
         
-        // 添加闪烁效果 - 定时的整体闪烁，模拟电竞特效
-        if (flashActive) {
-            // 创建白色闪烁效果
-            value = 200; // 高亮度
-            saturation = 100; // 低饱和度，接近白色
-        }
-        
         // 设置LED颜色
         strip.setPixelColor(i, strip.ColorHSV(finalHue, saturation, value));
     }
     
     strip.show();
     
-    // 根据是否处于闪烁状态来调整动画速度
-    if (flashActive) {
-        startHue += 200;  // 闪烁时加快色相变化
-        flowOffset += 0.1; // 闪烁时加快流动
-        delay(15); // 闪烁时加快整体动画
-    } else {
-        startHue += 100;  // 正常色相变化速度
-        flowOffset += 0.06; // 正常流动速度
-        delay(18); // 正常动画速度
-    }
-    
+    // 更新动画参数
+    startHue += 100;  // 正常色相变化速度
+    flowOffset += 0.05; // 正常流动速度
     satOffset += 0.03; // 控制饱和度变化速度
     pulseOffset += 0.03; // 控制脉冲速度
+    
+    delay(18); // 正常动画速度
 }
