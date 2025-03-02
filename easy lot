@@ -1,0 +1,45 @@
+#include <SoftwareSerial.h>
+#include <Adafruit_NeoPixel.h> // 引入WS2812库
+#include "Obloq.h"
+
+SoftwareSerial softSerial(TX,RX);
+//生成OBLOQ对象，参数：串口指针，wifiSsid, WifiPwd, iotId, iotPwd
+//Generate OBLOQ object, parameters: serial pointer, wifiSsid, WifiPwd, iotId, iotPwd
+Obloq olq(&softSerial,"OnePlus 10 Pro","55132768","L1knOCGHg","YJkndCGNgz");
+const String devTopic = "dlyyG1NNR";
+
+// WS2812灯的引脚和数量
+#define LED_PIN 48
+#define NUM_LEDS 1 // 根据需要设置LED数量
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800); // 创建WS2812对象
+
+//已监听设备的消息回调函数，可以在这个函数里面对接收的消息做判断和相应处理，需要用setMsgHandle()来设置这个回调函数
+//message callback function of the subscribed device. This function handle the message received. setMsgHandle() will change settings of this function.
+void msgHandle(const String& topic,const String& message)
+{
+    if(devTopic == topic)
+    {
+        if(message == "1") {
+            strip.setPixelColor(0, strip.Color(255, 0, 0)); // 红色
+            strip.show();
+        }
+        else if(message == "2") {
+            strip.setPixelColor(0, strip.Color(0, 0, 255)); // 蓝色
+            strip.show();
+        }
+    }
+}
+
+void setup()
+{
+    strip.begin(); // 初始化WS2812
+    strip.show();  // 初始化所有LED为关闭状态
+    pinMode(LED_PIN, OUTPUT);
+    softSerial.begin(9600);
+    olq.setMsgHandle(msgHandle);//注册消息回调函数 register message callback function
+    olq.subscribe(devTopic); //监听设备 Subscribe topic
+}
+void loop()
+{
+    olq.update();
+}
