@@ -1,0 +1,225 @@
+#include <Arduino.h>
+#include <WiFi.h>
+// 注释掉有问题的库，改用HTTP客户端
+// #include <AsyncTCP.h>
+// #include <ESPAsyncWebServer.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+// UHF-RFID模块使用串口通信，不需要特定库
+
+// 定义LED_BUILTIN，ESP32通常使用GPIO2作为板载LED
+#define LED_BUILTIN 2
+
+// Wi-Fi 配置
+const char* ssid = "您的WiFi名称";
+const char* password = "您的WiFi密码";
+
+// 与树莓派通信的配置
+IPAddress raspberryPiIP(192, 168, 1, 100);  // 树莓派IP地址
+const int raspberryPiPort = 8080;            // 通信端口
+
+// RFID命令和状态变量
+unsigned char ReadMulti[10] = {0XBB, 0X00, 0X27, 0X00, 0X03, 0X22, 0XFF, 0XFF, 0X4A, 0X7E};
+unsigned int timeSec = 0;
+unsigned int timemin = 0;
+unsigned int dataAdd = 0;
+unsigned int incomedate = 0;
+unsigned int parState = 0;
+unsigned int codeState = 0;
+
+// 当前标签数据
+struct TagData {
+  String id;      // EPC代码
+  int rssi;       // 信号强度
+  unsigned long timestamp;  // 时间戳
+};
+
+TagData currentTag = {"", 0, 0};
+String currentEPC = "";  // 用于暂存正在接收的EPC
+int currentRSSI = 0;     // 用于暂存正在接收的RSSI
+
+// 声明函数
+void processRFIDData();
+void sendDataToRaspberryPi(TagData tag);
+void checkCommandsFromRaspberryPi();
+
+// AsyncWebServer server(80);  // 如果需要Web服务
+
+void setup() {
+  // 设置LED指示灯
+  pinMode(LED_BUILTIN, OUTPUT);
+  
+  // 初始化串口通信
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("启动金属货架环境货物定位系统...");
+
+  // 连接WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi 已连接");
+  Serial.print("IP 地址: ");
+  Serial.println(WiFi.localIP());
+
+  // 发送初始读取命令到RFID读取器
+  Serial.write(ReadMulti, 10);
+  Serial.println("已发送RFID读取命令");
+}
+
+void loop() {
+  // 定时发送RFID读取命令
+  timeSec++;
+  if (timeSec >= 50000) {
+    timemin++;
+    timeSec = 0;
+    if (timemin >= 20) {
+      timemin = 0;
+      // 发送循环读取指令并闪烁LED指示灯
+      digitalWrite(LED_BUILTIN, HIGH);
+      Serial.write(ReadMulti, 10);
+      Serial.println("已发送RFID读取命令");
+      digitalWrite(LED_BUILTIN, LOW);
+    }
+  }
+
+  // 处理RFID数据
+  processRFIDData();
+  
+  // 如果读到有效标签，发送到树莓派
+  if (currentTag.id.length() > 0 && currentTag.rssi > 0) {
+    sendDataToRaspberryPi(currentTag);
+    // 清除当前标签数据，避免重复发送
+    currentTag.id = "";
+    currentTag.rssi = 0;
+  }
+  
+  // 检查来自树莓派的指令
+  checkCommandsFromRaspberryPi();
+  
+  delay(10);  // 短暂延时，保持系统响应性
+}
+
+void processRFIDData() {
+  if (Serial.available() > 0) {
+    incomedate = Serial.read();  // 获取串口接收到的数据
+    
+    // 判断是否为对应指令代码
+    if ((incomedate == 0x02) && (parState == 0)) {
+      parState = 1;
+    }
+    // 判断是否为对应指令参数
+    else if ((parState == 1) && (incomedate == 0x22) && (codeState == 0)) {  
+      codeState = 1;
+      dataAdd = 3;
+      // 重置临时数据
+      currentEPC = "";
+      currentRSSI = 0;
+    }
+    else if (codeState == 1) {
+      dataAdd++;
+      // 获取RSSI
+      if (dataAdd == 6) {
+        currentRSSI = incomedate;
+        Serial.print("RSSI: "); 
+        Serial.println(incomedate, HEX);
+      }
+      // 获取PC码(跳过处理)
+      else if ((dataAdd == 7) || (dataAdd == 8)) {
+        if (dataAdd == 7) {
+          Serial.print("PC: "); 
+          Serial.print(incomedate, HEX);
+        }
+        else {
+          Serial.println(incomedate, HEX);
+        }
+      }
+      // 获取EPC
+      else if ((dataAdd >= 9) && (dataAdd <= 20)) {
+        if (dataAdd == 9) {
+          Serial.print("EPC: "); 
+        }
+        // 将EPC字节添加到临时字符串
+        char hexStr[3];
+        sprintf(hexStr, "%02X", incomedate);
+        currentEPC += hexStr;
+        Serial.print(incomedate, HEX);
+      }
+      // 位置溢出，完成一次接收
+      else if (dataAdd >= 21) {
+        Serial.println(""); 
+        // 更新当前标签数据
+        if (currentEPC.length() > 0) {
+          currentTag.id = currentEPC;
+          currentTag.rssi = currentRSSI;
+          currentTag.timestamp = millis();
+          
+          Serial.println("读取到标签: ");
+          Serial.print("ID: ");
+          Serial.println(currentTag.id);
+          Serial.print("RSSI: ");
+          Serial.println(currentTag.rssi);
+        }
+        
+        // 重置状态，准备下一次接收
+        dataAdd = 0;
+        parState = 0;
+        codeState = 0;
+      }
+    }
+    else {
+      // 接收错误，重置状态
+      dataAdd = 0;
+      parState = 0;
+      codeState = 0;
+    }
+  }
+}
+
+void sendDataToRaspberryPi(TagData tag) {
+  // 将标签数据序列化为JSON
+  DynamicJsonDocument doc(1024); // 继续使用DynamicJsonDocument，忽略弃用警告
+  // 或者可以使用 StaticJsonDocument<1024> doc; // 如果JSON数据较小，可以用这个
+  
+  doc["id"] = tag.id;
+  doc["rssi"] = tag.rssi;
+  doc["timestamp"] = tag.timestamp;
+  
+  String jsonString;
+  serializeJson(doc, jsonString);
+  
+  // 输出调试信息
+  Serial.println("发送数据到树莓派:");
+  Serial.println(jsonString);
+  
+  // 使用HTTP客户端发送数据
+  if(WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "http://" + raspberryPiIP.toString() + ":" + String(raspberryPiPort) + "/tag";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    int httpCode = http.POST(jsonString);
+    
+    if(httpCode > 0) {
+      Serial.printf("HTTP响应代码: %d\n", httpCode);
+      if(httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        Serial.println("服务器响应: ");
+        Serial.println(payload);
+      }
+    } else {
+      Serial.printf("HTTP请求失败，错误: %s\n", http.errorToString(httpCode).c_str());
+    }
+    
+    http.end();
+  }
+}
+
+void checkCommandsFromRaspberryPi() {
+  // 这里实现检查来自树莓派的命令的逻辑
+  // 如果使用HTTP，可以定期轮询服务器命令端点
+  // 例如: http://raspberryPiIP:raspberryPiPort/commands
+}
