@@ -1,22 +1,79 @@
 #include <Arduino.h>
-#include <WiFi.h>
-// 注释掉有问题的库，改用HTTP客户端
+// 移除所有WiFi和HTTP相关库
 // #include <AsyncTCP.h>
 // #include <ESPAsyncWebServer.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+// #include <HTTPClient.h>
 // UHF-RFID模块使用串口通信，不需要特定库
+#include <math.h>  // 添加数学库用于计算距离
 
 // 定义LED_BUILTIN，ESP32通常使用GPIO2作为板载LED
 #define LED_BUILTIN 2
 
-// Wi-Fi 配置
-const char* ssid = "您的WiFi名称";
-const char* password = "您的WiFi密码";
+// 定义RFID模块连接的串口引脚
+// 使用UART2的引脚，避免与烧录串口冲突
+#define RFID_RX 18  // ESP32的UART2 RX引脚
+#define RFID_TX 19  // ESP32的UART2 TX引脚
 
-// 与树莓派通信的配置
-IPAddress raspberryPiIP(192, 168, 1, 100);  // 树莓派IP地址
-const int raspberryPiPort = 8080;            // 通信端口
+// 调试模式
+#define DEBUG_MODE false  // 关闭大部分调试输出以提高性能
+
+// RSSI稳定性分析参数
+#define RSSI_SAMPLE_SIZE 10    // RSSI采样数量
+#define RSSI_STABILITY_THRESHOLD 5.0  // RSSI稳定性阈值（标准差）
+
+// RSSI转距离模型参数
+#define REFERENCE_DISTANCE 1.0    // 参考距离d₀，单位米
+#define REFERENCE_RSSI -50       // 参考距离处的RSSI₀值，已调整为转换后的dBm值
+#define PATH_LOSS_EXPONENT 2.5   // 路径损耗指数n，调整为金属环境更合适的值
+#define DEFAULT_ENV_FACTOR 1.0   // 默认环境因子
+
+// 前向声明结构体
+struct RSSIAnalysis;
+struct TagRSSIAnalysis;
+struct CalibrationTag;
+struct TagData;
+
+// RSSI稳定性分析结构
+struct RSSIAnalysis {
+    float mean;          // RSSI平均值
+    float stdDev;        // 标准差
+    int sampleCount;     // 样本数量
+    bool isStable;       // 是否稳定
+    int samples[RSSI_SAMPLE_SIZE];  // RSSI样本数组
+};
+
+// 为每个标签ID创建RSSI分析对象
+struct TagRSSIAnalysis {
+    String tagId;
+    RSSIAnalysis analysis;
+};
+
+// 校准标签结构定义
+struct CalibrationTag {
+  String id;           // EPC代码
+  float knownDistance; // 已知实际距离，单位米
+  int rssi;            // 测量的RSSI值
+};
+
+// 当前标签数据
+struct TagData {
+  String id;            // EPC代码
+  int rssi;             // 信号强度
+  float distance;       // 估计距离，单位米
+  bool isStable;        // RSSI是否稳定
+  unsigned long timestamp;  // 时间戳
+};
+
+// 全局变量声明
+TagRSSIAnalysis tagAnalyses[10];  // 最多存储10个标签的分析数据
+int tagAnalysisCount = 0;
+CalibrationTag calibrationTags[] = {
+  {"CALIBTAG1", 0.5, -70},  // 校准标签在0.5米处约-70dBm
+  {"CALIBTAG2", 1.0, -80},  // 校准标签在1.0米处约-80dBm
+  {"CALIBTAG3", 2.0, -90},  // 校准标签在2.0米处约-90dBm
+};
+const int calibrationTagCount = sizeof(calibrationTags) / sizeof(CalibrationTag);
+float currentEnvFactor = DEFAULT_ENV_FACTOR;
 
 // RFID命令和状态变量
 unsigned char ReadMulti[10] = {0XBB, 0X00, 0X27, 0X00, 0X03, 0X22, 0XFF, 0XFF, 0X4A, 0X7E};
@@ -27,199 +84,278 @@ unsigned int incomedate = 0;
 unsigned int parState = 0;
 unsigned int codeState = 0;
 
-// 当前标签数据
-struct TagData {
-  String id;      // EPC代码
-  int rssi;       // 信号强度
-  unsigned long timestamp;  // 时间戳
-};
+// 数据帧缓冲区
+unsigned char frameBuffer[50];  // 用于存储完整的数据帧
+int frameIndex = 0;
 
-TagData currentTag = {"", 0, 0};
+TagData currentTag = {"", 0, 0.0, false, 0};
 String currentEPC = "";  // 用于暂存正在接收的EPC
 int currentRSSI = 0;     // 用于暂存正在接收的RSSI
 
-// 声明函数
-void processRFIDData();
-void sendDataToRaspberryPi(TagData tag);
-void checkCommandsFromRaspberryPi();
+// 在全局变量区域添加
+unsigned long lastDebugTime = 0;       // 上次调试输出的时间
+unsigned long lastErrorMsgTime = 0;    // 上次错误消息的时间
+#define ERROR_MSG_INTERVAL 3000        // 错误消息输出间隔(ms)
+#define DEBUG_PRINT_INTERVAL 1000      // 普通调试信息输出间隔(ms)
 
-// AsyncWebServer server(80);  // 如果需要Web服务
+// 添加一个全局变量跟踪最后一次标签检测时间
+unsigned long lastTagDetectionTime = 0;
+#define TAG_DETECTION_TIMEOUT 30000  // 30秒未检测到标签报警
+
+// 实时性设置
+#define RFID_READ_INTERVAL 5       // 每次RFID读取命令发送的间隔(ms)
+#define MAX_SERIAL_PROCESS 50      // 每次循环最多处理的串口数据量
+unsigned long lastRfidCmdTime = 0; // 上次发送RFID命令的时间
+
+// 函数声明
+void processRFIDData();
+float calculateDistance(int rssi, float envFactor);
+float calculateEnvironmentalFactor();
+RSSIAnalysis analyzeRSSI(int rssi, String tagId);
+TagRSSIAnalysis* findOrCreateTagAnalysis(String tagId);
+
+// RSSI稳定性分析函数
+RSSIAnalysis analyzeRSSI(int rssi, String tagId) {
+    RSSIAnalysis result;
+    result.mean = 0;
+    result.stdDev = 0;
+    result.isStable = false;
+    
+    // 查找或创建标签分析对象
+    TagRSSIAnalysis* tagAnalysis = findOrCreateTagAnalysis(tagId);
+    if (!tagAnalysis) {
+        return result;  // 如果无法创建新的分析对象，返回空结果
+    }
+    
+    // 更新样本数组
+    for (int i = RSSI_SAMPLE_SIZE - 1; i > 0; i--) {
+        tagAnalysis->analysis.samples[i] = tagAnalysis->analysis.samples[i-1];
+    }
+    tagAnalysis->analysis.samples[0] = rssi;
+    
+    // 计算平均值
+    float sum = 0;
+    for (int i = 0; i < RSSI_SAMPLE_SIZE; i++) {
+        sum += tagAnalysis->analysis.samples[i];
+    }
+    result.mean = sum / RSSI_SAMPLE_SIZE;
+    
+    // 计算标准差
+    float sumSquaredDiff = 0;
+    for (int i = 0; i < RSSI_SAMPLE_SIZE; i++) {
+        float diff = tagAnalysis->analysis.samples[i] - result.mean;
+        sumSquaredDiff += diff * diff;
+    }
+    result.stdDev = sqrt(sumSquaredDiff / RSSI_SAMPLE_SIZE);
+    
+    // 判断是否稳定
+    result.isStable = (result.stdDev <= RSSI_STABILITY_THRESHOLD);
+    
+    return result;
+}
+
+// 查找或创建标签分析对象
+TagRSSIAnalysis* findOrCreateTagAnalysis(String tagId) {
+    // 查找现有分析对象
+    for (int i = 0; i < tagAnalysisCount; i++) {
+        if (tagAnalyses[i].tagId == tagId) {
+            return &tagAnalyses[i];
+        }
+    }
+    
+    // 如果未找到且还有空间，创建新的分析对象
+    if (tagAnalysisCount < 10) {
+        tagAnalyses[tagAnalysisCount].tagId = tagId;
+        tagAnalyses[tagAnalysisCount].analysis.sampleCount = 0;
+        tagAnalyses[tagAnalysisCount].analysis.isStable = false;
+        // 初始化样本数组
+        for (int i = 0; i < RSSI_SAMPLE_SIZE; i++) {
+            tagAnalyses[tagAnalysisCount].analysis.samples[i] = 0;
+        }
+        tagAnalysisCount++;
+        return &tagAnalyses[tagAnalysisCount - 1];
+    }
+    
+    return nullptr;  // 没有可用空间
+}
 
 void setup() {
-  // 设置LED指示灯
-  pinMode(LED_BUILTIN, OUTPUT);
-  
-  // 初始化串口通信
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("启动金属货架环境货物定位系统...");
+    // 设置LED指示灯
+    pinMode(LED_BUILTIN, OUTPUT);
+    
+    // 初始化主串口通信用于调试
+    Serial.begin(115200);
+    delay(1000);
+    Serial.println("\n\n========================================");
+    Serial.println("  启动金属货架环境货物定位系统");
+    Serial.println("  UHF-RFID标签定位系统 v1.0");
+    Serial.println("  实时优化版");
+    Serial.println("========================================");
 
-  // 连接WiFi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi 已连接");
-  Serial.print("IP 地址: ");
-  Serial.println(WiFi.localIP());
+    // 初始化第二个串口用于RFID通信 - 增加缓冲区大小
+    Serial2.begin(115200, SERIAL_8N1, RFID_RX, RFID_TX); 
+    Serial2.setRxBufferSize(512);  // 增加接收缓冲区大小
+    Serial.println("RFID模块串口已初始化");
 
-  // 发送初始读取命令到RFID读取器
-  Serial.write(ReadMulti, 10);
-  Serial.println("已发送RFID读取命令");
+    // 计算初始环境因子
+    currentEnvFactor = DEFAULT_ENV_FACTOR;  // 使用默认环境因子，避免启动时延迟
+    Serial.print("初始环境因子: ");
+    Serial.println(currentEnvFactor);
+
+    // 发送初始读取命令到RFID读取器
+    Serial2.write(ReadMulti, 10);
+    Serial.println("已发送RFID读取命令");
+    Serial.println("系统已启动，等待标签数据...");
+    Serial.println("========================================\n");
+    
+    lastRfidCmdTime = millis();
 }
 
 void loop() {
-  // 定时发送RFID读取命令
-  timeSec++;
-  if (timeSec >= 50000) {
-    timemin++;
-    timeSec = 0;
-    if (timemin >= 20) {
-      timemin = 0;
-      // 发送循环读取指令并闪烁LED指示灯
-      digitalWrite(LED_BUILTIN, HIGH);
-      Serial.write(ReadMulti, 10);
-      Serial.println("已发送RFID读取命令");
-      digitalWrite(LED_BUILTIN, LOW);
+    unsigned long currentTime = millis();
+    
+    // 更频繁地发送RFID读取命令以提高响应性
+    if (currentTime - lastRfidCmdTime >= RFID_READ_INTERVAL) {
+        lastRfidCmdTime = currentTime;
+        Serial2.write(ReadMulti, 10);
     }
-  }
 
-  // 处理RFID数据
-  processRFIDData();
-  
-  // 如果读到有效标签，发送到树莓派
-  if (currentTag.id.length() > 0 && currentTag.rssi > 0) {
-    sendDataToRaspberryPi(currentTag);
-    // 清除当前标签数据，避免重复发送
-    currentTag.id = "";
-    currentTag.rssi = 0;
-  }
-  
-  // 检查来自树莓派的指令
-  checkCommandsFromRaspberryPi();
-  
-  delay(10);  // 短暂延时，保持系统响应性
+    // 尽可能频繁地处理RFID数据
+    processRFIDData();
+    
+    // 检查是否长时间未检测到标签，但频率降低以避免影响性能
+    if (lastTagDetectionTime > 0 && (currentTime - lastTagDetectionTime > TAG_DETECTION_TIMEOUT)) {
+        // 每30秒只提醒一次
+        if ((currentTime - lastTagDetectionTime) % TAG_DETECTION_TIMEOUT < 100) {
+            Serial.println("\n！！！警告：长时间未检测到标签！！！");
+        }
+    }
+    
+    // 移除延时，提高响应性
 }
 
-void processRFIDData() {
-  if (Serial.available() > 0) {
-    incomedate = Serial.read();  // 获取串口接收到的数据
+// 计算RSSI到距离的转换 - 简化版
+float calculateDistance(int rssi, float envFactor) {
+    // 将RFID模块的RSSI值(0-255)转换为dBm值
+    int convertedRSSI = -100 + (rssi * 70) / 255;
     
-    // 判断是否为对应指令代码
-    if ((incomedate == 0x02) && (parState == 0)) {
-      parState = 1;
+    // 计算距离
+    float exponent = (REFERENCE_RSSI - convertedRSSI) / (10.0 * PATH_LOSS_EXPONENT * envFactor);
+    float distance = REFERENCE_DISTANCE * pow(10.0, exponent);
+    
+    return distance;
+}
+
+// 基于校准标签计算最佳环境因子
+float calculateEnvironmentalFactor() {
+  // 如果没有校准标签，返回默认值
+  if (calibrationTagCount == 0) {
+    return DEFAULT_ENV_FACTOR;
+  }
+  
+  float bestEF = DEFAULT_ENV_FACTOR;
+  float minError = 999999.0;
+  
+  // 测试不同环境因子值
+  for (float ef = 0.5; ef <= 2.0; ef += 0.1) {
+    float totalError = 0.0;
+    
+    // 计算每个校准标签的误差
+    for (int i = 0; i < calibrationTagCount; i++) {
+      float estimatedDistance = calculateDistance(calibrationTags[i].rssi, ef);
+      float error = abs(estimatedDistance - calibrationTags[i].knownDistance);
+      totalError += error;
     }
-    // 判断是否为对应指令参数
-    else if ((parState == 1) && (incomedate == 0x22) && (codeState == 0)) {  
-      codeState = 1;
-      dataAdd = 3;
-      // 重置临时数据
-      currentEPC = "";
-      currentRSSI = 0;
+    
+    // 更新最佳环境因子
+    if (totalError < minError) {
+      minError = totalError;
+      bestEF = ef;
     }
-    else if (codeState == 1) {
-      dataAdd++;
-      // 获取RSSI
-      if (dataAdd == 6) {
-        currentRSSI = incomedate;
-        Serial.print("RSSI: "); 
-        Serial.println(incomedate, HEX);
-      }
-      // 获取PC码(跳过处理)
-      else if ((dataAdd == 7) || (dataAdd == 8)) {
-        if (dataAdd == 7) {
-          Serial.print("PC: "); 
-          Serial.print(incomedate, HEX);
+  }
+  
+  return bestEF;
+}
+
+// 简化版的RFID数据处理函数，提高处理速度
+void processRFIDData() {
+    // 提高串口处理的优先级和频率
+    int processed = 0;
+    
+    while (Serial2.available() > 0 && processed < MAX_SERIAL_PROCESS) {
+        processed++;
+        incomedate = Serial2.read();
+        
+        // 判断是否为对应指令代码
+        if ((incomedate == 0x02) && (parState == 0)) {
+            parState = 1;
+        }
+        // 判断是否为对应指令参数
+        else if ((parState == 1) && (incomedate == 0x22) && (codeState == 0)) {  
+            codeState = 1;
+            dataAdd = 3;
+            // 重置临时数据
+            currentEPC = "";
+            currentRSSI = 0;
+        }
+        else if (codeState == 1) {
+            dataAdd++;
+            
+            // 获取RSSI
+            if (dataAdd == 6) {
+                currentRSSI = incomedate;
+            }
+            // 获取PC码(跳过处理)
+            else if ((dataAdd == 7) || (dataAdd == 8)) {
+                // 简化，不打印PC码
+            }
+            // 获取EPC
+            else if ((dataAdd >= 9) && (dataAdd <= 20)) {
+                // 将EPC字节添加到临时字符串
+                char hexStr[3];
+                sprintf(hexStr, "%02X", incomedate);
+                currentEPC += hexStr;
+            }
+            // 位置溢出，完成一次接收
+            else if (dataAdd >= 21) {
+                // 更新当前标签数据
+                if (currentEPC.length() > 0) {
+                    // 立即显示标签数据，提高响应性
+                    Serial.println("\n------------------------------");
+                    Serial.println("** 实时标签 **");
+                    Serial.println("------------------------------");
+                    Serial.print("标签ID: ");
+                    Serial.println(currentEPC);
+                    Serial.print("RSSI值: ");
+                    Serial.println(currentRSSI);
+                    Serial.print("估计距离(米): ");
+                    Serial.println(calculateDistance(currentRSSI, currentEnvFactor));
+                    Serial.println("------------------------------\n");
+                    
+                    // 更新标签数据和时间戳
+                    currentTag.id = currentEPC;
+                    currentTag.rssi = currentRSSI;
+                    currentTag.distance = calculateDistance(currentRSSI, currentEnvFactor);
+                    currentTag.timestamp = millis();
+                    lastTagDetectionTime = millis();
+                    
+                    // 闪烁LED指示新标签
+                    digitalWrite(LED_BUILTIN, HIGH);
+                    delay(5);  // 极短闪烁，不影响性能
+                    digitalWrite(LED_BUILTIN, LOW);
+                }
+                
+                // 重置状态，准备下一次接收
+                dataAdd = 0;
+                parState = 0;
+                codeState = 0;
+            }
         }
         else {
-          Serial.println(incomedate, HEX);
+            // 接收错误，重置状态，不打印错误消息以提高性能
+            dataAdd = 0;
+            parState = 0;
+            codeState = 0;
         }
-      }
-      // 获取EPC
-      else if ((dataAdd >= 9) && (dataAdd <= 20)) {
-        if (dataAdd == 9) {
-          Serial.print("EPC: "); 
-        }
-        // 将EPC字节添加到临时字符串
-        char hexStr[3];
-        sprintf(hexStr, "%02X", incomedate);
-        currentEPC += hexStr;
-        Serial.print(incomedate, HEX);
-      }
-      // 位置溢出，完成一次接收
-      else if (dataAdd >= 21) {
-        Serial.println(""); 
-        // 更新当前标签数据
-        if (currentEPC.length() > 0) {
-          currentTag.id = currentEPC;
-          currentTag.rssi = currentRSSI;
-          currentTag.timestamp = millis();
-          
-          Serial.println("读取到标签: ");
-          Serial.print("ID: ");
-          Serial.println(currentTag.id);
-          Serial.print("RSSI: ");
-          Serial.println(currentTag.rssi);
-        }
-        
-        // 重置状态，准备下一次接收
-        dataAdd = 0;
-        parState = 0;
-        codeState = 0;
-      }
     }
-    else {
-      // 接收错误，重置状态
-      dataAdd = 0;
-      parState = 0;
-      codeState = 0;
-    }
-  }
-}
-
-void sendDataToRaspberryPi(TagData tag) {
-  // 将标签数据序列化为JSON
-  DynamicJsonDocument doc(1024); // 继续使用DynamicJsonDocument，忽略弃用警告
-  // 或者可以使用 StaticJsonDocument<1024> doc; // 如果JSON数据较小，可以用这个
-  
-  doc["id"] = tag.id;
-  doc["rssi"] = tag.rssi;
-  doc["timestamp"] = tag.timestamp;
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  // 输出调试信息
-  Serial.println("发送数据到树莓派:");
-  Serial.println(jsonString);
-  
-  // 使用HTTP客户端发送数据
-  if(WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    String url = "http://" + raspberryPiIP.toString() + ":" + String(raspberryPiPort) + "/tag";
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    int httpCode = http.POST(jsonString);
-    
-    if(httpCode > 0) {
-      Serial.printf("HTTP响应代码: %d\n", httpCode);
-      if(httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        Serial.println("服务器响应: ");
-        Serial.println(payload);
-      }
-    } else {
-      Serial.printf("HTTP请求失败，错误: %s\n", http.errorToString(httpCode).c_str());
-    }
-    
-    http.end();
-  }
-}
-
-void checkCommandsFromRaspberryPi() {
-  // 这里实现检查来自树莓派的命令的逻辑
-  // 如果使用HTTP，可以定期轮询服务器命令端点
-  // 例如: http://raspberryPiIP:raspberryPiPort/commands
 }
