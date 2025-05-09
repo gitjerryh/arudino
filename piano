@@ -1,0 +1,553 @@
+#include <Arduino.h>
+#include <driver/i2s.h> // 用于I2S通信
+#include <cmath>        // 用于 M_PI, sinf, sqrtf
+#include <arduinoFFT.h> // 引入arduinoFFT库
+
+//---------------------------------------------------------------------------//
+// I2S 配置
+// !! 注意: 请根据您的 ESP32-S3 开发板和接线修改以下引脚定义 !!
+#define I2S_MIC_SERIAL_CLOCK      (GPIO_NUM_7)  // SCK / BCLK
+#define I2S_MIC_WORD_SELECT       (GPIO_NUM_5)  // WS / LRCK
+#define I2S_MIC_SERIAL_DATA       (GPIO_NUM_6)  // SD / DIN
+#define I2S_PORT                  (I2S_NUM_0)
+
+// 进一步提高采样参数 - 特别是采样窗口大小
+#define I2S_SAMPLE_RATE           (44100)  // 采样率保持44.1kHz (CD音质)
+#define SAMPLES_PER_FRAME         (1024)   // 调整为最大允许值1024
+#define I2S_READ_BUFFER_SIZE      (SAMPLES_PER_FRAME * sizeof(int32_t))
+
+// 调试标志
+#define DEBUG_MODE               1  // 设置为1启用调试输出，0禁用
+
+// 音符定义
+#define NOTE_C      0
+#define NOTE_CS     1
+#define NOTE_D      2
+#define NOTE_DS     3
+#define NOTE_E      4
+#define NOTE_F      5
+#define NOTE_FS     6
+#define NOTE_G      7
+#define NOTE_GS     8
+#define NOTE_A      9
+#define NOTE_AS    10
+#define NOTE_B     11
+
+// 音符频率表（用于调试和参考）
+const float NOTE_FREQ[12][8] = {
+    {16.35, 32.70, 65.41, 130.81, 261.63, 523.25, 1046.50, 2093.00}, // C
+    {17.32, 34.65, 69.30, 138.59, 277.18, 554.37, 1108.73, 2217.46}, // C#/Db
+    {18.35, 36.71, 73.42, 146.83, 293.66, 587.33, 1174.66, 2349.32}, // D
+    {19.45, 38.89, 77.78, 155.56, 311.13, 622.25, 1244.51, 2489.02}, // D#/Eb
+    {20.60, 41.20, 82.41, 164.81, 329.63, 659.26, 1318.51, 2637.02}, // E
+    {21.83, 43.65, 87.31, 174.61, 349.23, 698.46, 1396.91, 2793.83}, // F
+    {23.12, 46.25, 92.50, 185.00, 369.99, 739.99, 1479.98, 2959.96}, // F#/Gb
+    {24.50, 49.00, 98.00, 196.00, 392.00, 783.99, 1567.98, 3135.96}, // G
+    {25.96, 51.91, 103.83, 207.65, 415.30, 830.61, 1661.22, 3322.44}, // G#/Ab
+    {27.50, 55.00, 110.00, 220.00, 440.00, 880.00, 1760.00, 3520.00}, // A
+    {29.14, 58.27, 116.54, 233.08, 466.16, 932.33, 1864.66, 3729.31}, // A#/Bb
+    {30.87, 61.74, 123.47, 246.94, 493.88, 987.77, 1975.53, 3951.07}  // B
+};
+
+//---------------------------------------------------------------------------//
+// FFT库对象和相关数组
+ArduinoFFT<double> FFT;
+double vReal[SAMPLES_PER_FRAME]; // FFT 实部输入/输出
+double vImag[SAMPLES_PER_FRAME]; // FFT 虚部输入/输出
+
+//---------------------------------------------------------------------------//
+// Forward declarations
+void Chord_det();
+int findClosestNote(float frequency);
+void printNoteAndOctave(int midiNote);
+//---------------------------------------------------------------------------//
+
+//---------------------------------------------------------------------------//
+// int   in[SAMPLES_PER_FRAME]; // 这个数组之前用于旧FFT的输入，现在vReal将直接从处理后的样本填充
+// byte  NoteV[13]={8,23,40,57,76,96,116,138,162,187,213,241,255}; // 这个数组似乎在当前音符识别逻辑中未使用，可以考虑移除或保留以备用
+float f_peaks[8]; // 最终提取的峰值频率
+float peak_amps[8]; // 对应的峰值幅度 (来自HPS或直接频谱)
+//---------------------------------------------------------------------------//
+
+void i2s_mic_init() {
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+        .sample_rate = I2S_SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT, // INMP441是24位, 通常读入32位槽的MSB部分
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,  // 假设L/R引脚接地，数据在左声道
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 4,                           // DMA缓冲区数量
+        .dma_buf_len = SAMPLES_PER_FRAME,             // 每个DMA缓冲区的采样点数
+        .use_apll = true,                             // 使用APLL获得更精确的时钟
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_MIC_SERIAL_CLOCK,
+        .ws_io_num = I2S_MIC_WORD_SELECT,
+        .data_out_num = I2S_PIN_NO_CHANGE, // 不是TX模式
+        .data_in_num = I2S_MIC_SERIAL_DATA
+    };
+
+    esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    if (err != ESP_OK) {
+        Serial.printf("I2S driver install failed: %d\n", err);
+        return;
+    }
+    err = i2s_set_pin(I2S_PORT, &pin_config);
+    if (err != ESP_OK) {
+        Serial.printf("I2S set pin failed: %d\n", err);
+        return;
+    }
+    Serial.println("I2S Mic Initialized");
+}
+
+// 辅助函数：根据频率找到最接近的MIDI音符
+int findClosestNote(float frequency) {
+    if (frequency <= 0) return -1;
+    
+    // 使用标准公式: MIDI号 = 12*log2(f/440) + 69
+    return round(12.0f * log2f(frequency/440.0f) + 69.0f);
+}
+
+// 将MIDI音符转换为可读的音符名称和八度
+void printNoteAndOctave(int midiNote) {
+    if (midiNote < 0) return;
+    
+    const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    int octave = (midiNote / 12) - 1; // MIDI音符0是C-1
+    int noteIndex = midiNote % 12;
+    
+    if (DEBUG_MODE) {
+        Serial.print(noteNames[noteIndex]);
+        Serial.print(octave);
+        Serial.print(" (MIDI: ");
+        Serial.print(midiNote);
+        Serial.println(")");
+    }
+}
+
+void  setup() {
+  Serial.begin(115200);
+  delay(1000); // 给串口一些初始化时间
+  Serial.println("钢琴音符识别系统启动...");
+  Serial.println("优化版本 - 提高中低音识别能力");
+  i2s_mic_init(); // 初始化I2S麦克风
+}
+
+
+void loop() 
+{ 
+  Chord_det();
+  delay(100); // 增加一些延迟，避免连续检测
+}
+
+
+//-----------------------------Chord  Detection Function----------------------------------------------//
+// Documentation  on Chord_detection:https://www.instructables.com/member/abhilash_patel/instructables/
+//  Code Written By: Abhilash Patel
+// Contact: abhilashpatel121@gmail.com
+//  this code written for arduino Nano board (should also  work for UNO) or better board
+//  this code won't work for any board having RAM less than 2kb,
+// More accurate  detection can be carried out on more powerful borad by increasing sample size
+
+
+
+void  Chord_det()
+{ 
+  long unsigned int a2; // 用于记录结束时间
+  float sum1=0,sum2=0;
+  float sampling = I2S_SAMPLE_RATE;  // 采样率是固定的
+
+  // Buffer for I2S read
+  static int32_t i2s_read_buff[SAMPLES_PER_FRAME];
+  size_t bytes_read;
+
+  // 从I2S读取数据
+  esp_err_t err = i2s_read(I2S_PORT, i2s_read_buff, I2S_READ_BUFFER_SIZE, &bytes_read, portMAX_DELAY); // 阻塞读取
+
+  if (err != ESP_OK) {
+    Serial.printf("I2S read error: %d\n", err);
+    return; 
+  }
+  if (bytes_read != I2S_READ_BUFFER_SIZE) {
+    Serial.printf("I2S read partial frame: %u bytes instead of %d\n", bytes_read, I2S_READ_BUFFER_SIZE);
+    return;
+  }
+  
+  // 预处理 - 计算DC偏移
+  float dc_offset = 0;
+  for(int i=0; i < SAMPLES_PER_FRAME; i++) {
+    dc_offset += (float)(i2s_read_buff[i] >> 8);
+  }
+  dc_offset /= SAMPLES_PER_FRAME;
+  
+  // 重置sum1, sum2
+  sum1=0;
+  sum2=0;
+
+  // 调整后的高通滤波器 - 使用更小的alpha值保留更多低频
+  static float prev_filtered = 0;
+  static float prev_raw = 0;
+  const float alpha = 0.8; // 降低高通滤波强度，保留更多低频
+
+  for(int i=0; i < SAMPLES_PER_FRAME; i++)
+  {
+    // 获取数据并去除DC偏移
+    float raw_sample = (float)(i2s_read_buff[i] >> 8) - dc_offset;
+    
+    // 应用更温和的高通滤波器
+    float filtered_sample = alpha * (prev_filtered + raw_sample - prev_raw);
+    prev_filtered = filtered_sample;
+    prev_raw = raw_sample;
+    
+    // 继续计算统计量
+    sum1 += filtered_sample;
+    sum2 += filtered_sample * filtered_sample;
+
+    // 应用汉宁窗
+    float hann_window_val = 0.5 * (1.0 - cosf(2.0 * M_PI * i / (SAMPLES_PER_FRAME - 1)));
+    float windowed_sample = filtered_sample * hann_window_val;
+    
+    // 填充FFT输入数组
+    vReal[i] = windowed_sample * 2.0f; // 之前是 in[i] = ...
+    vImag[i] = 0.0; // 虚部为0
+  }
+             
+  sum1 /= SAMPLES_PER_FRAME;
+  sum2 = sqrtf(sum2 / SAMPLES_PER_FRAME);
+
+  if(DEBUG_MODE) {
+    Serial.print("DC偏移: "); Serial.println(dc_offset);
+    Serial.print("平均值: "); Serial.println(sum1);
+    Serial.print("RMS值: "); Serial.println(sum2);
+  }
+
+  // 动态调整的阈值
+  static float noise_floor = 500.0f; // 降低初始噪声底
+  static float signal_threshold = 2000.0f; // 降低初始信号阈值
+  
+  // 如果RMS值小于当前噪声底且大于最小阈值，慢慢调整噪声底
+  if(sum2 < noise_floor && sum2 > 50.0f) {
+    noise_floor = 0.95f * noise_floor + 0.05f * sum2;
+  }
+  
+  // 信号阈值设为噪声底的倍数，但不低于最小值
+  signal_threshold = max(noise_floor * 2.5f, 1000.0f);
+  
+  if(DEBUG_MODE) {
+    Serial.print("噪声底: "); Serial.println(noise_floor);
+    Serial.print("信号阈值: "); Serial.println(signal_threshold);
+  }
+  
+  if(sum2 > signal_threshold) {
+       if(DEBUG_MODE) Serial.println("检测到声音，使用arduinoFFT进行分析...");
+       
+       // 使用arduinoFFT库执行FFT
+       FFT.compute(vReal, vImag, SAMPLES_PER_FRAME, FFTDirection::Forward); // 执行FFT
+       FFT.complexToMagnitude(vReal, vImag, SAMPLES_PER_FRAME); // 计算幅值，结果存回vReal
+                                                              // vImag不再需要，vReal现在是幅值谱
+
+       // HPS算法实现 (作用于vReal，即幅值谱)
+       const int num_fft_bins = SAMPLES_PER_FRAME / 2; // FFT输出的有效数据点 (到奈奎斯特频率)
+       static double hps_spectrum[num_fft_bins];
+
+       // 1. 初始化HPS数组为原始频谱 (vReal的前半部分)
+       for(int i=0; i<num_fft_bins; i++) {
+           hps_spectrum[i] = vReal[i];
+           float current_freq = (float)i * sampling / (float)SAMPLES_PER_FRAME;
+           if(current_freq < 100.0f) { // 增强低频
+               hps_spectrum[i] *= 1.2f;
+           }
+       }
+
+       // 2. 执行HPS计算
+       const float harmonic_weights[] = {1.0f, 0.8f, 0.6f, 0.4f}; // 权重不变
+       const int max_harmonic_hps = 4;
+       if(DEBUG_MODE) Serial.println("HPS计算 (arduinoFFT)...");
+
+       // 特殊处理B3-C4频率范围
+       const float B3_freq = 246.94f;
+       const float C4_freq = 261.63f;
+       const int B3_idx = round(B3_freq * SAMPLES_PER_FRAME / sampling);
+       const int C4_idx = round(C4_freq * SAMPLES_PER_FRAME / sampling);
+       
+       for(int h=2; h<=max_harmonic_hps; h++) {
+           float weight = harmonic_weights[h-1]; 
+           for(int i=1; i < num_fft_bins / h; i++) { 
+               if ((i * h) < num_fft_bins) { // 确保谐波索引在范围内
+                   // 对B3-C4范围进行特殊处理
+                   if(i >= B3_idx && i <= C4_idx) {
+                       float freq = (float)i * sampling / (float)SAMPLES_PER_FRAME;
+                       float dist_to_B3 = fabs(freq - B3_freq);
+                       float dist_to_C4 = fabs(freq - C4_freq);
+                       float B3_weight = 1.0f - (dist_to_B3 / (C4_freq - B3_freq));
+                       hps_spectrum[i] *= (vReal[i * h] * weight * B3_weight);
+                   } else {
+                       hps_spectrum[i] *= (vReal[i * h] * weight);
+                   }
+               }
+           }
+       }
+
+       // 3. 规范化HPS结果
+       double max_hps = 0.0;
+       for(int i=0; i<num_fft_bins; i++) {
+           if(hps_spectrum[i] > max_hps) max_hps = hps_spectrum[i];
+       }
+       if(max_hps > 1e-6) { // 防止除以0或极小值
+           for(int i=0; i<num_fft_bins; i++) {
+               hps_spectrum[i] = (hps_spectrum[i] / max_hps) * 1000.0; 
+           }
+       }
+       
+       // 4. 钢琴中低频区域的额外增强 (作用于HPS结果)
+       const float piano_enhance_low_freq = 27.5f;  // A0
+       const float piano_enhance_target_freq = 246.94f; // B3, 我们希望在这个频率附近增强最大
+       const float piano_enhance_upper_freq = 280.0f; // 略高于B3，比如到C#4附近，之后增强效果减弱
+
+       const int enhance_low_idx = round(piano_enhance_low_freq * SAMPLES_PER_FRAME / sampling);
+       const int enhance_target_idx = round(piano_enhance_target_freq * SAMPLES_PER_FRAME / sampling);
+       const int enhance_upper_idx = round(piano_enhance_upper_freq * SAMPLES_PER_FRAME / sampling);
+
+       for(int i = max(1, enhance_low_idx); i < min(enhance_upper_idx, num_fft_bins); i++) {
+           float boost_factor = 1.0f;
+           if (i <= enhance_target_idx) { // 从 enhance_low_idx 到 enhance_target_idx，增强因子从1.5增加到2.5
+               if (enhance_target_idx - enhance_low_idx < 1) { // 防止除以0或负数
+                   boost_factor = (i == enhance_target_idx) ? 2.5f : 1.5f;
+               } else {
+                   boost_factor = 1.5f + 1.0f * (float)(i - enhance_low_idx) / (enhance_target_idx - enhance_low_idx);
+               }
+           } else { // 从 enhance_target_idx 到 enhance_upper_idx，增强因子从2.5降低到1.0
+               if (enhance_upper_idx - enhance_target_idx < 1) { // 防止除以0或负数
+                   boost_factor = 1.0f; // 或者根据情况设为2.5f，如果区间长度为0
+               } else {
+                  boost_factor = 2.5f - 1.5f * (float)(i - enhance_target_idx) / (enhance_upper_idx - enhance_target_idx);
+               } 
+           }
+           boost_factor = max(1.0f, min(2.5f, boost_factor)); // 限制增强因子在 1.0 到 2.5 之间
+           hps_spectrum[i] *= boost_factor; 
+       }
+
+       if(DEBUG_MODE) {
+           Serial.println("HPS (arduinoFFT) 计算完成.");
+           for(int i=1; i < 20 && i < num_fft_bins; i++) { 
+               float freq_bin = (float)i * sampling / (float)SAMPLES_PER_FRAME;
+               Serial.print("频率 "); Serial.print(freq_bin, 1);
+               Serial.print(" Hz 的HPS值: "); Serial.println(hps_spectrum[i]);
+           }
+       }
+       
+       // 峰值检测 (作用于HPS处理后的 hps_spectrum)
+       // 需要一个临时数组来存储峰值索引，之前用的是全局in_ps
+       static int peak_indices[num_fft_bins] = {0}; // 最大可能的峰值数量
+       int peak_count = 0;
+
+       for(int i=1; i < num_fft_bins - 1; i++) {
+           bool is_peak = false;
+           float current_hps_val = hps_spectrum[i];
+           float freq = (float)i * sampling / (float)SAMPLES_PER_FRAME;
+           
+           // 对B3-C4范围使用更严格的峰值检测
+           if(freq >= B3_freq && freq <= C4_freq) {
+               is_peak = (current_hps_val > 1.5 * hps_spectrum[i-1] && 
+                         current_hps_val > 1.5 * hps_spectrum[i+1] && 
+                         current_hps_val > 200.0f);
+           } else if(i < (10 * SAMPLES_PER_FRAME/128)) { 
+               is_peak = (current_hps_val > 1.2 * hps_spectrum[i-1] && 
+                         current_hps_val > 1.2 * hps_spectrum[i+1] && 
+                         current_hps_val > 150.0f); 
+           } else if(i < (30 * SAMPLES_PER_FRAME/128)) { 
+               is_peak = (current_hps_val > hps_spectrum[i-1] && 
+                         current_hps_val > hps_spectrum[i+1] && 
+                         current_hps_val > 100.0f); 
+           } else {
+               is_peak = (current_hps_val > hps_spectrum[i-1] && 
+                         current_hps_val > hps_spectrum[i+1] && 
+                         current_hps_val > 50.0f);
+           }
+           if(is_peak) {
+               if (peak_count < num_fft_bins) { 
+                   peak_indices[peak_count++] = i;
+               }
+           }    
+       }
+       if(peak_count < 3 && peak_count < num_fft_bins) { 
+           int current_found = peak_count;
+           for(int i=1; i < num_fft_bins - 1 && current_found < num_fft_bins; i++) {
+               if(hps_spectrum[i] > hps_spectrum[i-1] && hps_spectrum[i] > hps_spectrum[i+1] && hps_spectrum[i] > 30.0f) {
+                   bool already_added = false;
+                   for(int pk=0; pk<peak_count; ++pk) if(peak_indices[pk] == i) already_added = true;
+                   if(!already_added) peak_indices[current_found++] = i;
+               }
+           }
+           peak_count = current_found;
+       }
+
+       // 对峰值按HPS幅值排序 (降序)
+       for (int i = 0; i < peak_count - 1; i++) {
+           for (int j = 0; j < peak_count - i - 1; j++) {
+               if (hps_spectrum[peak_indices[j]] < hps_spectrum[peak_indices[j+1]]) {
+                   int temp = peak_indices[j];
+                   peak_indices[j] = peak_indices[j+1];
+                   peak_indices[j+1] = temp;
+               }
+           }
+       }
+
+       // 更新 f_peaks (频率) 和 peak_amps (HPS幅值)
+       for(int i=0; i<8; i++) { 
+           if(i < peak_count && peak_indices[i] > 0 && peak_indices[i] < num_fft_bins - 1) { 
+               int pk_idx = peak_indices[i];
+               float y1 = hps_spectrum[pk_idx-1];
+               float y2 = hps_spectrum[pk_idx];
+               float y3 = hps_spectrum[pk_idx+1];
+               float d_interp = (y3 - y1) / (2.0f * (2.0f * y2 - y1 - y3 + 1e-9f)); 
+               
+               float true_peak_pos_interp = (float)pk_idx + d_interp;
+               
+               f_peaks[i] = true_peak_pos_interp * sampling / (float)SAMPLES_PER_FRAME;
+               peak_amps[i] = y2; 
+               
+               if(DEBUG_MODE) {
+                   Serial.print("精确峰值(HPS) "); Serial.print(i);
+                   Serial.print(": 位置 "); Serial.print(true_peak_pos_interp, 2);
+                   Serial.print(" -> "); Serial.print(f_peaks[i], 2);
+                   Serial.print(" Hz (HPS幅值: "); Serial.print(peak_amps[i], 2);
+                   Serial.println(")");
+                   int midiNote = findClosestNote(f_peaks[i]);
+                   if(midiNote >=0) { Serial.print("   -> MIDI: "); printNoteAndOctave(midiNote); }
+               }
+           } else {
+               f_peaks[i] = 0;
+               peak_amps[i] = 0;
+           }
+       }
+      
+       // 确保音符权重计算等部分正确使用更新后的 f_peaks 和 peak_amps
+       bool valid_peak_found = false;
+       for(int i=0; i<8; i++) {
+         if(f_peaks[i] > 15.0f && f_peaks[i] < 5000.0f) {
+           valid_peak_found = true;
+           break;
+         }
+       }
+       if(!valid_peak_found) {
+         if(DEBUG_MODE) Serial.println("HPS后未检测到有效频率峰值");
+         return;
+       }
+              
+       float note_weights[12] = {0};
+       for(int i=0; i<8; i++) {
+         float freq = f_peaks[i];
+         float amp = peak_amps[i];
+         if(freq < 15.0f || freq > 5000.0f || amp < 10.0f) continue;
+         
+         // 对B3-C4范围进行特殊处理
+         if(freq >= B3_freq && freq <= C4_freq) {
+             float dist_to_B3 = fabs(freq - B3_freq);
+             float dist_to_C4 = fabs(freq - C4_freq);
+             float B3_weight = 1.0f - (dist_to_B3 / (C4_freq - B3_freq));
+             amp *= B3_weight;
+         }
+         
+         int midiNote = findClosestNote(freq);
+         if(midiNote < 0) continue;
+         int noteClass = midiNote % 12;
+         float weight = amp * (8.0f - i) / 8.0f;
+         if(midiNote < 60) weight *= 1.5f;
+         note_weights[noteClass] += weight;
+       }
+       
+       if(DEBUG_MODE) {
+         Serial.println("音符权重:");
+         for(int i=0; i<12; i++) {
+           Serial.print(i); Serial.print(" (");
+           switch(i) {
+             case NOTE_C: Serial.print("C"); break;
+             case NOTE_CS: Serial.print("C#"); break;
+             case NOTE_D: Serial.print("D"); break;
+             case NOTE_DS: Serial.print("D#"); break;
+             case NOTE_E: Serial.print("E"); break;
+             case NOTE_F: Serial.print("F"); break;
+             case NOTE_FS: Serial.print("F#"); break;
+             case NOTE_G: Serial.print("G"); break;
+             case NOTE_GS: Serial.print("G#"); break;
+             case NOTE_A: Serial.print("A"); break;
+             case NOTE_AS: Serial.print("A#"); break;
+             case NOTE_B: Serial.print("B"); break;
+           }
+           Serial.print("): "); 
+           Serial.println(note_weights[i]);
+         }
+       }
+
+       float max_weight = 0;
+       int max_note = -1;
+       
+       for(int i=0; i<12; i++) {
+         if(note_weights[i] > max_weight) {
+           max_weight = note_weights[i];
+           max_note = i;
+         }
+       }
+       
+       if(max_note < 0 || max_weight < 50) { // 调整权重阈值
+         if(DEBUG_MODE) Serial.println("没有找到明显的主导音符 (HPS)");
+         return;
+       }
+       
+       bool is_major = false;
+       bool is_minor = false;
+       int major_third = (max_note + 4) % 12;
+       int perfect_fifth = (max_note + 7) % 12;
+       if(note_weights[major_third] > max_weight * 0.2 && 
+          note_weights[perfect_fifth] > max_weight * 0.2) { // 调整和弦检测阈值
+         is_major = true;
+       }
+       int minor_third = (max_note + 3) % 12;
+       if(note_weights[minor_third] > max_weight * 0.2 && 
+          note_weights[perfect_fifth] > max_weight * 0.2) {
+         is_minor = true;
+       }
+       
+       char note_char_name = ' '; // Renamed to avoid conflict
+       switch(max_note) {
+         case NOTE_C: note_char_name = 'C'; break;
+         case NOTE_CS: Serial.print("C#"); break; // Keep direct print for sharps
+         case NOTE_D: note_char_name = 'D'; break;
+         case NOTE_DS: Serial.print("D#"); break;
+         case NOTE_E: note_char_name = 'E'; break;
+         case NOTE_F: note_char_name = 'F'; break;
+         case NOTE_FS: Serial.print("F#"); break;
+         case NOTE_G: note_char_name = 'G'; break;
+         case NOTE_GS: Serial.print("G#"); break;
+         case NOTE_A: note_char_name = 'A'; break;
+         case NOTE_AS: Serial.print("A#"); break;
+         case NOTE_B: note_char_name = 'B'; break;
+       }
+       
+       bool is_sharp_note = (max_note == NOTE_CS || max_note == NOTE_DS || max_note == NOTE_FS || 
+                             max_note == NOTE_GS || max_note == NOTE_AS);
+       if(!is_sharp_note) {
+         Serial.print(note_char_name);
+       }
+       
+       if(is_minor) {
+         Serial.println("m");
+       } else if(is_major) {
+         Serial.println(" "); // Major chord, or single note if no other components
+       } else {
+         Serial.println(""); // Single note
+       }
+  } else {
+    if(DEBUG_MODE && sum2 > 1000) { // 阈值可能需要调整
+      Serial.print("声音太小 (RMS): "); 
+      Serial.println(sum2);
+    }
+    } 
+}
+    
+//------------------------------------------------------------------------------------//
