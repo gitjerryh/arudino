@@ -1,0 +1,59 @@
+#include <Arduino.h>
+#include <ESP32Servo.h>
+
+// 创建舵机对象
+Servo myServo;
+
+// 舵机控制引脚
+const int servoPin = 4;
+
+// 当前舵机角度
+int currentAngle = 90;
+
+void setup() {
+  // 初始化串口通信
+  Serial.begin(115200);
+  
+  // 初始化舵机
+  myServo.attach(servoPin);
+  
+  // 等待舵机初始化
+  delay(1000);
+  
+  // 将舵机转动至90度初始位置
+  myServo.write(currentAngle);
+  
+  Serial.println("舵机控制系统已启动");
+  Serial.println("请输入角度值（0-180）来控制舵机转动");
+  Serial.println("当前角度: 90度");
+}
+
+void loop() {
+  // 检查串口是否有数据
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim(); // 去除首尾空白字符
+    
+    // 尝试解析输入的角度值
+    int targetAngle = input.toInt();
+    
+    // 验证角度范围（0-180度）
+    if (targetAngle >= 0 && targetAngle <= 180) {
+      // 更新舵机角度
+      myServo.write(targetAngle);
+      currentAngle = targetAngle;
+      
+      Serial.print("舵机已转动至: ");
+      Serial.print(targetAngle);
+      Serial.println("度");
+    } else {
+      Serial.println("错误：角度必须在0-180度之间");
+      Serial.print("当前角度: ");
+      Serial.print(currentAngle);
+      Serial.println("度");
+    }
+  }
+  
+  // 短暂延迟以避免过度占用CPU
+  delay(10);
+}
