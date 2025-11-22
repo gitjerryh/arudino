@@ -34,6 +34,11 @@ void loop() {
     String input = Serial.readStringUntil('\n');
     input.trim(); // 去除首尾空白字符
     
+    // 如果输入为空，直接忽略
+    if (input.length() == 0) {
+      return;
+    }
+    
     // 尝试解析输入的角度值
     int targetAngle = input.toInt();
     
