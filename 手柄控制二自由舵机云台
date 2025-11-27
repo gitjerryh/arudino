@@ -1,0 +1,269 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include <PS2X_lib.h>
+
+namespace {
+
+// PS2 Controller pins
+constexpr uint8_t kPS2_DAT = 16;
+constexpr uint8_t kPS2_CMD = 17;
+constexpr uint8_t kPS2_SEL = 5;
+constexpr uint8_t kPS2_CLK = 18;
+
+// Servo configuration
+constexpr uint8_t kServoChannelMin = 0;
+constexpr uint8_t kServoChannelMax = 1;
+constexpr uint8_t kServoChannelHorizontal = 0;  // 水平通道
+constexpr uint8_t kServoChannelVertical = 1;    // 垂直通道
+constexpr uint16_t kServoMinPulse = 120;   // Adjust to match your servo
+constexpr uint16_t kServoMaxPulse = 600;   // Adjust to match your servo
+constexpr float kServoMinAngle = 0.0f;
+constexpr float kServoMaxAngle = 180.0f;
+constexpr uint16_t kPwmFrequency = 50;     // Hz for standard servos
+constexpr uint32_t kSerialBaudRate = 115200;
+
+// Gimbal initial positions
+constexpr float kHorizontalInitAngle = 95.0f;  // 水平初始角度
+constexpr float kVerticalInitAngle = 85.0f;    // 垂直初始角度
+
+// PS2 joystick configuration
+constexpr uint8_t kJoystickCenter = 128;
+constexpr uint8_t kJoystickDeadzone = 20;
+constexpr float kJoystickSensitivity = 0.5f;  // 摇杆灵敏度
+
+// Current servo angles
+float currentHorizontalAngle = kHorizontalInitAngle;
+float currentVerticalAngle = kVerticalInitAngle;
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+PS2X ps2x;
+
+uint16_t angleToPulse(float angle) {
+  angle = constrain(angle, kServoMinAngle, kServoMaxAngle);
+  const float span = kServoMaxAngle - kServoMinAngle;
+  const float ratio = (angle - kServoMinAngle) / span;
+  return static_cast<uint16_t>(kServoMinPulse + ratio * (kServoMaxPulse - kServoMinPulse));
+}
+
+void setServoAngle(uint8_t channel, float angle) {
+  const uint16_t pulse = angleToPulse(angle);
+  pwm.setPWM(channel, 0, pulse);
+}
+
+void printUsage() {
+  Serial.println(F("=== PCA9685 二自由度舵机云台控制 ==="));
+  Serial.println(F("控制方式:"));
+  Serial.println(F("1. PS2手柄右摇杆: 控制云台方向"));
+  Serial.println(F("   • 左右: 水平转动 (通道0)"));
+  Serial.println(F("   • 上下: 垂直转动 (通道1)"));
+  Serial.println(F("2. 串口输入: <通道> <角度>"));
+  Serial.println(F("   • 示例: 0 90  或  1:45  或  0,135"));
+  Serial.println(F("   • 通道: 0(水平) 或 1(垂直)"));
+  Serial.println(F("   • 角度: 0-180°"));
+  Serial.println(F("初始位置: 水平95° 垂直85°"));
+  Serial.println(F("输入 help 可再次查看说明"));
+}
+
+int mapJoystickToAngleDelta(uint8_t joystickValue) {
+  const int delta = static_cast<int>(joystickValue) - kJoystickCenter;
+  if (abs(delta) < kJoystickDeadzone) {
+    return 0;
+  }
+  return static_cast<int>(delta * kJoystickSensitivity / 10.0f);
+}
+
+void updateGimbalFromPS2() {
+  ps2x.read_gamepad(false, 0);
+  
+  // 读取右摇杆值 (PSS_RX: 水平, PSS_RY: 垂直)
+  const uint8_t rightX = ps2x.Analog(PSS_RX);
+  const uint8_t rightY = ps2x.Analog(PSS_RY);
+  
+  // 计算角度变化
+  const int horizontalDelta = -mapJoystickToAngleDelta(rightX);
+  const int verticalDelta = -mapJoystickToAngleDelta(rightY);  // 反向以匹配直觉
+  
+  // 更新角度
+  if (horizontalDelta != 0) {
+    currentHorizontalAngle = constrain(
+      currentHorizontalAngle + horizontalDelta,
+      kServoMinAngle,
+      kServoMaxAngle
+    );
+    setServoAngle(kServoChannelHorizontal, currentHorizontalAngle);
+  }
+  
+  if (verticalDelta != 0) {
+    currentVerticalAngle = constrain(
+      currentVerticalAngle + verticalDelta,
+      kServoMinAngle,
+      kServoMaxAngle
+    );
+    setServoAngle(kServoChannelVertical, currentVerticalAngle);
+  }
+}
+
+bool parseUint16(const String &token, uint16_t minValue, uint16_t maxValue, uint16_t &result) {
+  if (token.length() == 0) {
+    return false;
+  }
+
+  for (size_t i = 0; i < token.length(); ++i) {
+    if (!isDigit(token.charAt(i))) {
+      return false;
+    }
+  }
+
+  const long value = token.toInt();
+  if (value < static_cast<long>(minValue) || value > static_cast<long>(maxValue)) {
+    return false;
+  }
+
+  result = static_cast<uint16_t>(value);
+  return true;
+}
+
+void handleSerialInput(const String &rawInput) {
+  if (rawInput.length() == 0) {
+    return;
+  }
+
+  if (rawInput.equalsIgnoreCase(F("help"))) {
+    printUsage();
+    return;
+  }
+
+  String input = rawInput;
+  input.replace(',', ' ');
+  input.replace(':', ' ');
+  input.trim();
+
+  while (input.indexOf(F("  ")) != -1) {
+    input.replace(F("  "), F(" "));
+  }
+
+  const int separator = input.indexOf(' ');
+  if (separator <= 0) {
+    Serial.println(F("⚠️ 格式错误，请输入 <通道> <角度>"));
+    printUsage();
+    return;
+  }
+
+  const String channelToken = input.substring(0, separator);
+  String angleToken = input.substring(separator + 1);
+  angleToken.trim();
+
+  uint16_t channelValue = 0;
+  uint16_t angleValue = 0;
+
+  if (!parseUint16(channelToken, kServoChannelMin, kServoChannelMax, channelValue)) {
+    Serial.println(F("⚠️ 通道无效，仅支持 0 或 1"));
+    return;
+  }
+
+  if (!parseUint16(angleToken, static_cast<uint16_t>(kServoMinAngle),
+                   static_cast<uint16_t>(kServoMaxAngle), angleValue)) {
+    Serial.println(F("⚠️ 角度无效，范围 0-180°"));
+    return;
+  }
+
+  const float angle = static_cast<float>(angleValue);
+  setServoAngle(static_cast<uint8_t>(channelValue), angle);
+  
+  // 更新当前角度
+  if (channelValue == kServoChannelHorizontal) {
+    currentHorizontalAngle = angle;
+  } else if (channelValue == kServoChannelVertical) {
+    currentVerticalAngle = angle;
+  }
+
+  Serial.print(F("通道 "));
+  Serial.print(channelValue);
+  Serial.print(F(" 已设定至 "));
+  Serial.print(angleValue);
+  Serial.println(F("°"));
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(kSerialBaudRate);
+  delay(1000);
+  
+  Serial.println(F("========================================"));
+  Serial.println(F("二自由度舵机云台初始化"));
+  Serial.println(F("========================================"));
+  
+  // 初始化 PCA9685
+  Serial.println(F("正在初始化 PCA9685..."));
+  pwm.begin();
+  pwm.setPWMFreq(kPwmFrequency);
+  delay(10);
+  Serial.println(F("✓ PCA9685 初始化完成"));
+  
+  // 初始化 PS2 手柄
+  Serial.println(F("正在初始化 PS2 手柄..."));
+  Serial.println(F("接线说明:"));
+  Serial.print(F("  DAT(棕色) -> GPIO")); Serial.println(kPS2_DAT);
+  Serial.print(F("  CMD(橙色) -> GPIO")); Serial.println(kPS2_CMD);
+  Serial.print(F("  SEL(黄色) -> GPIO")); Serial.println(kPS2_SEL);
+  Serial.print(F("  CLK(蓝色) -> GPIO")); Serial.println(kPS2_CLK);
+  Serial.println(F("  VCC(红色) -> 3.3V"));
+  Serial.println(F("  GND(黑色) -> GND"));
+  
+  delay(500);
+  
+  const int error = ps2x.config_gamepad(kPS2_CLK, kPS2_CMD, kPS2_SEL, kPS2_DAT, false, false);
+  
+  if (error == 0) {
+    Serial.println(F("✓ PS2 手柄初始化完成"));
+    const byte type = ps2x.readType();
+    Serial.print(F("  手柄类型: "));
+    switch(type) {
+      case 1: Serial.println(F("DualShock")); break;
+      case 3: Serial.println(F("Wireless DualShock")); break;
+      default: Serial.println(F("Unknown")); break;
+    }
+  } else {
+    Serial.print(F("⚠️ PS2 手柄初始化失败 (错误码: "));
+    Serial.print(error);
+    Serial.println(F(")"));
+    if (error == 1) {
+      Serial.println(F("  未检测到手柄，请检查接线"));
+    } else if (error == 2) {
+      Serial.println(F("  手柄未响应命令"));
+    }
+    Serial.println(F("  将仅支持串口控制模式"));
+  }
+  
+  // 设置初始位置
+  Serial.println(F("设置云台初始位置..."));
+  setServoAngle(kServoChannelHorizontal, kHorizontalInitAngle);
+  delay(100);
+  setServoAngle(kServoChannelVertical, kVerticalInitAngle);
+  delay(100);
+  Serial.print(F("✓ 水平: "));
+  Serial.print(kHorizontalInitAngle);
+  Serial.print(F("° 垂直: "));
+  Serial.print(kVerticalInitAngle);
+  Serial.println(F("°"));
+  
+  Serial.println(F("========================================"));
+  printUsage();
+  Serial.println(F("========================================"));
+}
+
+void loop() {
+  // 处理 PS2 手柄输入
+  updateGimbalFromPS2();
+  
+  // 处理串口输入
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    handleSerialInput(input);
+  }
+  
+  delay(20);  // 50Hz 更新频率
+}
