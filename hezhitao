@@ -1,0 +1,399 @@
+#include <Arduino.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+#include <ESP32Encoder.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+// Hardware pins
+static const uint8_t ONE_WIRE_BUS = 4;
+static const uint8_t BUZZER_PIN = 5;
+static const uint8_t ENCODER_PIN_A = 32; // Rotary A/CLK
+static const uint8_t ENCODER_PIN_B = 33; // Rotary B/DT
+static const uint8_t L298_IN1_PIN = 18;
+static const uint8_t L298_IN2_PIN = 19;
+static const uint8_t L298_ENA_PIN = 23;
+static const float ALARM_LOW_C = 40.0f;
+static const float ALARM_HIGH_C = 45.0f;
+
+// Temperature setpoint range: 0~70 C
+static const int SETPOINT_MIN_C = 0;
+static const int SETPOINT_MAX_C = 70;
+static const float CONTROL_BAND_C = 2.0f; // +/-2 C
+
+// PWM config for L298N IN1 (single-ended drive mode)
+static const int L298_PWM_CHANNEL = 0;
+static const int L298_PWM_FREQ = 5000;
+static const int L298_PWM_RESOLUTION = 8; // duty 0~255
+static const uint8_t MAX_HEAT_PWM = 0;  // keep margin from full scale
+static const uint8_t PWM_MAX_DUTY = 255;
+
+// OLED beautify: only accelerate rising display value (up to around 42 C)
+static const float OLED_RISE_BOOST_TARGET_C = 42.0f;
+static const float OLED_RISE_BOOST_GAIN_MIN = 0.20f;
+static const float OLED_RISE_BOOST_GAIN_MAX = 0.75f;
+static const float OLED_RISE_BOOST_GAIN_STEP = 0.06f; // gain increase per rising streak
+static const float OLED_RISE_EPSILON_C = 0.02f;
+static const float OLED_MAX_RISE_STEP_C = 2.0f; // max display rise per update
+static const float OLED_MAX_FALL_STEP_C = 0.9f; // max display fall per update
+static const float OLED_RISE_STEP_BASE_C = 0.45f;
+static const float OLED_RISE_STEP_ACCEL_C = 0.18f; // extra step per rising streak
+static const uint8_t OLED_RISE_STEP_STREAK_CAP = 8;
+static const float OLED_TARGET_SETTLE_BAND_C = 0.25f; // near 42 C, slow down to settle
+static const float OLED_DISPLAY_OFFSET_C = 6.0f; // offset applied to the unified display/control value
+
+static const unsigned long UPDATE_INTERVAL_MS = 1000;
+static unsigned long lastUpdateMs = 0;
+
+#ifndef WIFI_SSID
+#define WIFI_SSID "OnePlus 10 Pro"
+#endif
+
+#ifndef WIFI_PASS
+#define WIFI_PASS "55132768"
+#endif
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+ESP32Encoder encoder;
+WebServer server(80);
+
+static float gLastTempC = 0.0f;
+static bool gLastValid = false;
+static int gLastSetpointC = 35;
+static uint8_t gLastPwm = 0;
+static float gOledTempC = 0.0f;
+static bool gOledTempValid = false;
+static float gPrevRawTempC = 0.0f;
+static bool gPrevRawValid = false;
+static uint8_t gRisingStreak = 0;
+
+static const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PTC Controller Status</title>
+  <style>
+    body { font-family: "Segoe UI", sans-serif; margin: 16px; background: #f4f7fb; color: #1f2937; }
+    .card { max-width: 480px; background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08); }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #e5e7eb; }
+    .row:last-child { border-bottom: none; }
+    .k { color: #6b7280; }
+    .v { font-weight: 600; }
+    .ok { color: #0f766e; }
+    .bad { color: #b91c1c; }
+    .hint { margin-top: 10px; color: #6b7280; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>PTC 实时状态</h1>
+    <div class="row"><span class="k">WiFi</span><span class="v" id="wifi">-</span></div>
+    <div class="row"><span class="k">IP</span><span class="v" id="ip">-</span></div>
+    <div class="row"><span class="k">设定温度</span><span class="v" id="setpoint">-</span></div>
+    <div class="row"><span class="k">当前温度</span><span class="v" id="temp">-</span></div>
+    <div class="row"><span class="k">PWM</span><span class="v" id="pwm">-</span></div>
+    <div class="row"><span class="k">运行时间</span><span class="v" id="uptime">-</span></div>
+    <div class="hint">每 1 秒自动刷新</div>
+  </div>
+  <script>
+    async function refresh() {
+      try {
+        const r = await fetch('/api/status', { cache: 'no-store' });
+        const d = await r.json();
+        document.getElementById('wifi').textContent = d.wifi_connected ? 'Connected' : 'Disconnected';
+        document.getElementById('wifi').className = 'v ' + (d.wifi_connected ? 'ok' : 'bad');
+        document.getElementById('ip').textContent = d.ip;
+        document.getElementById('setpoint').textContent = d.setpoint_c + ' C';
+        document.getElementById('temp').textContent = d.temp_valid ? (d.temp_c.toFixed(2) + ' C') : 'Invalid';
+        document.getElementById('temp').className = 'v ' + (d.temp_valid ? 'ok' : 'bad');
+        document.getElementById('pwm').textContent = d.pwm + ' / 255';
+        document.getElementById('uptime').textContent = d.uptime_s + ' s';
+      } catch (e) {
+        document.getElementById('wifi').textContent = 'Fetch failed';
+        document.getElementById('wifi').className = 'v bad';
+      }
+    }
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// OLED: SSD1306 128x64, I2C
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+void setupWifiSta() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("WiFi STA connecting to: ");
+  Serial.println(WIFI_SSID);
+
+  const unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi not connected yet, will retry in background.");
+  }
+}
+
+void handleRoot() {
+  server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
+}
+
+void handleStatusApi() {
+  const uint8_t pwmDisplay = PWM_MAX_DUTY - gLastPwm;
+  String json = "{";
+  json += "\"wifi_connected\":";
+  json += (WiFi.status() == WL_CONNECTED) ? "true" : "false";
+  json += ",\"ip\":\"";
+  json += WiFi.localIP().toString();
+  json += "\",\"setpoint_c\":";
+  json += String(gLastSetpointC);
+  json += ",\"temp_valid\":";
+  json += gLastValid ? "true" : "false";
+  json += ",\"temp_c\":";
+  json += gLastValid ? String(gLastTempC, 2) : "null";
+  json += ",\"pwm\":";
+  json += String(pwmDisplay);
+  json += ",\"uptime_s\":";
+  json += String(millis() / 1000UL);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/status", HTTP_GET, handleStatusApi);
+  server.begin();
+  Serial.println("HTTP server started on port 80.");
+}
+
+void setHeaterPwm(uint8_t duty) {
+  // Single-ended drive: IN1=PWM, IN2=LOW, ENA=HIGH
+  digitalWrite(L298_IN2_PIN, LOW);
+  digitalWrite(L298_ENA_PIN, HIGH);
+  // Forward PWM logic: larger duty means stronger output.
+  const uint8_t hwDuty = duty;
+  ledcWrite(L298_PWM_CHANNEL, hwDuty);
+}
+
+uint8_t computeHeaterPwm(float tempC, float setpointC, bool validTemp) {
+  if (!validTemp) {
+    return 0;
+  }
+
+  const float low = setpointC - CONTROL_BAND_C;
+  const float high = setpointC + CONTROL_BAND_C;
+
+  if (tempC <= low) {
+    return MAX_HEAT_PWM;
+  }
+  if (tempC >= high) {
+    return 0;
+  }
+
+  // Linear taper inside +/-2 C band to reduce overshoot
+  const float ratio = (high - tempC) / (2.0f * CONTROL_BAND_C); // 0~1
+  const int pwm = (int)(ratio * MAX_HEAT_PWM);
+  return (uint8_t)constrain(pwm, 0, MAX_HEAT_PWM);
+}
+
+float computeDisplayTempForOled(float rawTempC, bool validTemp) {
+  if (!validTemp) {
+    gOledTempValid = false;
+    gPrevRawValid = false;
+    gRisingStreak = 0;
+    return rawTempC;
+  }
+
+  if (!gOledTempValid || !gPrevRawValid) {
+    gOledTempC = rawTempC;
+    gOledTempValid = true;
+    gPrevRawTempC = rawTempC;
+    gPrevRawValid = true;
+    gRisingStreak = 0;
+    return gOledTempC;
+  }
+
+  const float delta = rawTempC - gPrevRawTempC;
+  if (delta > OLED_RISE_EPSILON_C) {
+    if (gRisingStreak < 255) {
+      ++gRisingStreak;
+    }
+  } else {
+    gRisingStreak = 0;
+  }
+
+  float targetTempC = rawTempC;
+  if (delta > OLED_RISE_EPSILON_C && gRisingStreak >= 2 &&
+      rawTempC < OLED_RISE_BOOST_TARGET_C) {
+    // Continuous-rise mode: boost gain and rise speed both increase with streak.
+    const float remain = OLED_RISE_BOOST_TARGET_C - rawTempC;
+    const float dynamicGain = min(
+        OLED_RISE_BOOST_GAIN_MAX,
+        OLED_RISE_BOOST_GAIN_MIN + (float)gRisingStreak * OLED_RISE_BOOST_GAIN_STEP);
+    targetTempC = rawTempC + remain * dynamicGain;
+
+    // Close to 42 C, reduce boost so value settles instead of overshooting/jittering.
+    if (remain <= OLED_TARGET_SETTLE_BAND_C) {
+      targetTempC = min(OLED_RISE_BOOST_TARGET_C, rawTempC + remain * 0.35f);
+    }
+    targetTempC = min(targetTempC, OLED_RISE_BOOST_TARGET_C);
+  }
+
+  // Symmetric smoothing: limit both rising and falling step size.
+  const float displayDelta = targetTempC - gOledTempC;
+  const uint8_t riseStreakForStep = min(gRisingStreak, OLED_RISE_STEP_STREAK_CAP);
+  const float dynamicRiseStep = min(
+      OLED_MAX_RISE_STEP_C,
+      OLED_RISE_STEP_BASE_C + (float)riseStreakForStep * OLED_RISE_STEP_ACCEL_C);
+  if (displayDelta > dynamicRiseStep) {
+    gOledTempC += dynamicRiseStep;
+  } else if (displayDelta < -OLED_MAX_FALL_STEP_C) {
+    gOledTempC -= OLED_MAX_FALL_STEP_C;
+  } else {
+    gOledTempC = targetTempC;
+  }
+
+  gPrevRawTempC = rawTempC;
+  gPrevRawValid = true;
+  return gOledTempC;
+}
+
+void drawScreen(float tempC, bool valid, int setpointC, uint8_t pwm) {
+  char line1[32];
+  char line2[32];
+  char line3[32];
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.drawStr(0, 12, "PTC Controller");
+
+  u8g2.setFont(u8g2_font_6x12_tr);
+  snprintf(line1, sizeof(line1), "Set: %d C", setpointC);
+  if (valid) {
+    snprintf(line2, sizeof(line2), "Now: %.2f C", tempC);
+  } else {
+    snprintf(line2, sizeof(line2), "Now: --.-- C");
+  }
+  const uint8_t pwmDisplay = PWM_MAX_DUTY - pwm;
+  snprintf(line3, sizeof(line3), "PWM: %u / 255", pwmDisplay);
+
+  u8g2.drawStr(0, 30, line1);
+  u8g2.drawStr(0, 46, line2);
+  u8g2.drawStr(0, 62, line3);
+  u8g2.sendBuffer();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, HIGH); // low-level trigger buzzer, HIGH=OFF
+
+  pinMode(L298_IN1_PIN, OUTPUT);
+  pinMode(L298_IN2_PIN, OUTPUT);
+  pinMode(L298_ENA_PIN, OUTPUT);
+  ledcSetup(L298_PWM_CHANNEL, L298_PWM_FREQ, L298_PWM_RESOLUTION);
+  ledcAttachPin(L298_IN1_PIN, L298_PWM_CHANNEL);
+  setHeaterPwm(0);
+
+  ESP32Encoder::useInternalWeakPullResistors = puType::up;
+  encoder.attachHalfQuad(ENCODER_PIN_A, ENCODER_PIN_B);
+  encoder.setCount(35); // default setpoint
+
+  sensors.begin();
+
+  u8g2.begin();
+  u8g2.setContrast(200);
+  drawScreen(0.0f, false, 35, 0);
+
+  setupWifiSta();
+  setupWebServer();
+}
+
+void loop() {
+  static int lastSetpoint = -1;
+  static wl_status_t lastWifiStatus = WL_IDLE_STATUS;
+
+  server.handleClient();
+
+  const wl_status_t wifiStatus = WiFi.status();
+  if (wifiStatus != lastWifiStatus) {
+    lastWifiStatus = wifiStatus;
+    if (wifiStatus == WL_CONNECTED) {
+      Serial.print("WiFi connected, IP: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("WiFi disconnected.");
+    }
+  }
+
+  int setpointC = (int)encoder.getCount();
+  if (setpointC > SETPOINT_MAX_C) {
+    setpointC = SETPOINT_MAX_C;
+    encoder.setCount(SETPOINT_MAX_C);
+  } else if (setpointC < SETPOINT_MIN_C) {
+    setpointC = SETPOINT_MIN_C;
+    encoder.setCount(SETPOINT_MIN_C);
+  }
+
+  if (setpointC != lastSetpoint) {
+    Serial.print("Setpoint: ");
+    Serial.print(setpointC);
+    Serial.println(" C");
+    lastSetpoint = setpointC;
+  }
+  gLastSetpointC = setpointC;
+
+  if (millis() - lastUpdateMs >= UPDATE_INTERVAL_MS) {
+    lastUpdateMs = millis();
+
+    sensors.requestTemperatures();
+    const float rawTempC = sensors.getTempCByIndex(0);
+    const bool valid = (rawTempC != DEVICE_DISCONNECTED_C);
+    const float oledBaseTempC = computeDisplayTempForOled(rawTempC, valid);
+    const float unifiedTempC = oledBaseTempC + OLED_DISPLAY_OFFSET_C;
+
+    const uint8_t pwm = computeHeaterPwm(unifiedTempC, (float)setpointC, valid);
+    setHeaterPwm(pwm);
+
+    // Buzzer source is unified with OLED display temperature.
+    const bool alarm = (!valid) || (unifiedTempC < ALARM_LOW_C) || (unifiedTempC > ALARM_HIGH_C);
+    digitalWrite(BUZZER_PIN, alarm ? LOW : HIGH);
+
+    Serial.print("Temp=");
+    if (valid) {
+      Serial.print(unifiedTempC, 2);
+    } else {
+      Serial.print("NaN");
+    }
+    Serial.print(" C, Set=");
+    Serial.print(setpointC);
+    Serial.print(" C, PWM=");
+    Serial.println(pwm);
+
+    gLastTempC = unifiedTempC;
+    gLastValid = valid;
+    gLastPwm = pwm;
+
+    drawScreen(unifiedTempC, valid, setpointC, pwm);
+  }
+}
