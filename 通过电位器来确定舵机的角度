@@ -1,0 +1,72 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+// 创建PCA9685对象，默认I2C地址为0x40
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+#define SERVOMIN  150 // 0度时的脉冲长度 (0-4096)
+#define SERVOMAX  600 // 180度时的脉冲长度 (0-4096)
+
+const int potPin = 34;      // 电位器连接到ESP32的ADC引脚
+const int servoChannel = 0; // 舵机插在PCA9685的通道0
+
+int currentPulse = 0;
+unsigned long lastDebugTime = 0; // 用于定时打印的计时器
+
+void setup() {
+  Serial.begin(115200);
+  // 等待串口初始化稳定
+  delay(1000); 
+  
+  Serial.println("=====================================");
+  Serial.println("ESP32 系统启动...");
+  Serial.println("正在初始化 I2C (SDA=21, SCL=22)...");
+  
+  // 强制显式指定 ESP32 的 I2C 引脚，防止底层 Wire 库卡死
+  Wire.begin(21, 22); 
+
+  Serial.println("正在连接 PCA9685...");
+  pwm.begin();
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(50); 
+  
+  Serial.println("PCA9685 初始化成功！");
+  delay(100);
+
+  // 读取电位器初始值
+  int initialPotValue = analogRead(potPin);
+  currentPulse = map(initialPotValue, 0, 4095, SERVOMIN, SERVOMAX);
+  pwm.setPWM(servoChannel, 0, currentPulse);
+
+  Serial.print("启动完毕！当前电位器初始 ADC 值: ");
+  Serial.println(initialPotValue);
+  Serial.println("=====================================");
+}
+
+void loop() {
+  // 1. 读取电位器原始数值 (范围 0-4095)
+  int potValue = analogRead(potPin);
+  int targetPulse = map(potValue, 0, 4095, SERVOMIN, SERVOMAX);
+
+  // 2. 【诊断功能】每隔 500 毫秒，强制打印一次底层数据
+  if (millis() - lastDebugTime > 500) {
+    Serial.print("[状态监控] 原始ADC值: ");
+    Serial.print(potValue);
+    Serial.print("  |  目标脉宽: ");
+    Serial.println(targetPulse);
+    lastDebugTime = millis();
+  }
+
+  // 3. 舵机防抖控制逻辑
+  if (abs(targetPulse - currentPulse) > 2) {
+    currentPulse = targetPulse;
+    pwm.setPWM(servoChannel, 0, currentPulse);
+    
+    // 只有发生有效转动时才额外提示
+    Serial.print(">>> 动作！舵机已转动至脉宽: "); 
+    Serial.println(currentPulse);
+  }
+
+  delay(20); 
+}
